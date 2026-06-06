@@ -1,224 +1,202 @@
-# Mega Tools
+# SEO Automation Orchestrator
 
-Внутренний SEO-инструмент с модульной архитектурой.
+Modular platform for technical SEO automation: crawling, sitemap processing, indexing workflows, audits, and reporting through API, background workers, and Telegram-based orchestration.
 
-## 📌 Описание
+## What It Is
 
-Mega Tools — это backend-система для автоматизации SEO-задач:
+SEO Automation Orchestrator is a task-driven backend platform for running technical SEO operations in a controlled way.
 
-* парсинг сайтов
-* парсинг sitemap
-* аудит страниц
-* отправка URL в поисковые системы
-* получение данных из поисковых систем
-* генерация отчетов
+The project is built around a simple idea:
 
-Telegram используется как основной интерфейс, но **не является частью бизнес-логики**.
+- SEO actions are modeled as tasks
+- tasks are executed asynchronously by workers
+- orchestration happens through Telegram and API
+- new tools are added as modules, not as one-off scripts
 
----
+This repository is not just a crawler. Crawling is the first substantial workflow already implemented, but the architecture is designed to support a broader SEO operations stack.
 
-## 🧠 Архитектурная идея
+## Current Capabilities
 
-Проект построен как **модульный монолит** с разделением на слои.
+The project already includes:
 
-Ключевой принцип:
+- project management through API and Telegram bot
+- task creation and queue-based execution
+- site crawling with configurable depth, concurrency, page limits, and robots handling
+- separate crawl queues for standard and heavy websites
+- sitemap-oriented project setup
+- launch tracking and task status reporting in Telegram
+- partial result checkpoints for long-running crawl tasks
+- CSV and XLSX export for crawl results
 
-> Вся бизнес-логика живет в модулях, интерфейсы (API, Telegram, worker) только вызывают её.
+## Planned Capabilities
 
-Сейчас проект находится в стадии **ранней рабочей реализации**:
+The platform is intended to grow into a broader SEO automation system, including:
 
-* базовый каркас уже собран
-* есть минимальный API
-* есть ORM и миграции
-* есть task pipeline через Redis + worker
-* отдельные бизнес-модули пока реализованы частично
+- sitemap parsing and sitemap QA
+- Yandex API workflows
+- Google API workflows
+- technical audits based on collected crawl and indexing data
+- reporting pipelines
+- more operational tooling exposed through Telegram and API
 
----
+## Architecture
 
-## 🏗 Структура проекта
+The codebase follows a modular monolith approach with clear boundaries between business logic and interfaces.
 
+Core direction of dependencies:
+
+```text
+interfaces -> application -> domain
 ```
+
+Principles:
+
+- business logic lives inside modules
+- Telegram, API, and workers orchestrate flows but do not own domain rules
+- long-running operations are executed as tasks
+- infrastructure is replaceable and isolated from domain logic
+
+## Project Structure
+
+```text
 app/
-  core/           # базовая инфраструктура (config, db, redis, logging)
-  interfaces/     # точки входа
-    api/          # FastAPI
-    bot/          # Telegram (aiogram)
-    worker/       # фоновые задачи
-  modules/        # бизнес-модули
+  core/           # config, db, redis, storage, shared infrastructure
+  interfaces/     # API, Telegram bot, worker entrypoints
+  modules/        # business modules
     projects/
     tasks/
-    sitemap/
     crawl/
+    sitemap/
     audit/
     indexing/
     reports/
-  bootstrap/      # сборка зависимостей (DI)
+  bootstrap/      # wiring and import utilities
 
-tests/            # тесты
+migrations/       # Alembic migrations
+tests/            # test suite
 ```
 
----
+## Main Components
 
-## 🧩 Модули
+### API
 
-Каждый модуль — изолированная бизнес-область.
+FastAPI application for project and task operations.
 
-Примеры:
+### Telegram Bot
 
-* `projects` — управление проектами
-* `tasks` — система задач (асинхронные операции)
-* `sitemap` — парсинг sitemap
-* `crawl` — обход сайта
-* `audit` — анализ и ошибки
-* `indexing` — работа с поисковыми системами
-* `reports` — генерация файлов
+Primary operator interface for:
 
----
+- launching crawl tasks
+- configuring standard and heavy crawl modes
+- checking task and launch status
+- managing projects
 
-## 🧱 Структура модуля
+### Worker
 
-Каждый модуль имеет одинаковую структуру:
+RQ worker processes asynchronous tasks from Redis-backed queues.
 
-```
-module/
-  domain/         # бизнес-сущности и правила
-  application/    # use cases (сценарии)
-  infrastructure/ # реализация (БД, API, парсеры)
-```
+Current queue split:
 
----
+- `crawl_default` for regular crawl tasks
+- `crawl_heavy` for large or sensitive websites
 
-## 🔌 Интерфейсы
+## Running Locally
 
-### API (`interfaces/api`)
+### 1. Prepare environment
 
-* HTTP endpoints (FastAPI)
-* webhook-и
-* служебные ручки
-* сейчас уже реализованы минимальные endpoints для `projects` и `tasks`
-
-### Bot (`interfaces/bot`)
-
-* Telegram интерфейс (aiogram)
-* только orchestration (без логики)
-
-### Worker (`interfaces/worker`)
-
-* выполнение фоновых задач
-* обработка очередей
-* сейчас используется Redis + RQ для выполнения фоновых задач
-
----
-
-## 🔁 Поток выполнения
-
-Пример:
-
-1. Пользователь запускает задачу в Telegram
-2. Bot handler вызывает use case
-3. Use case создаёт задачу (task)
-4. Worker выполняет задачу
-5. Результат сохраняется
-6. Пользователь получает статус/файл
-
-Текущий минимальный рабочий flow уже реализован в backend:
-
-1. API создаёт `Task` со статусом `pending`
-2. После commit задача ставится в Redis queue
-3. Worker забирает задачу
-4. Worker переводит её в `running`
-5. Выполняет обработку
-6. Сохраняет `result_payload` или `error_message`
-7. Обновляет статус до `success` или `failed`
-
----
-
-## 🔗 Зависимости слоев
-
-Разрешённое направление зависимостей:
-
-```
-interfaces → application → domain
+```bash
+cp .env.example .env
 ```
 
-* `domain` не знает ни о чём внешнем
-* `application` не зависит от фреймворков
-* `interfaces` только вызывают use cases
-* `infrastructure` реализует зависимости
+Fill in at least:
 
----
+- `DATABASE_URL`
+- `REDIS_URL`
+- `BOT_TOKEN`
 
-## ⚠️ Правила проекта
+### 2. Start infrastructure
 
-* ❌ Telegram не содержит бизнес-логику
+With Docker:
 
-* ❌ Никаких “общих services.py” на весь проект
+```bash
+docker compose up -d
+```
 
-* ❌ ORM-модели не используются как публичный контракт
+### 3. Install dependencies
 
-* ❌ Модули не лезут во внутренности друг друга
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
 
-* ✅ Всё через use cases
+### 4. Apply migrations
 
-* ✅ Четкое разделение слоев
+```bash
+alembic upgrade head
+```
 
-* ✅ Каждая длительная операция — task
+### 5. Run API
 
-* ✅ Отчеты — отдельный модуль
+```bash
+uvicorn app.main:app --reload
+```
 
----
+### 6. Run bot
 
-## 🚀 Текущий этап
+```bash
+python -m app.bot
+```
 
-Сейчас в проекте уже реализованы:
+### 7. Run workers
 
-* структура папок
-* базовые entrypoints
-* подключение PostgreSQL
-* SQLAlchemy ORM-модели
-* Alembic migrations
-* базовая Redis/RQ инфраструктура
-* минимальный API для `projects` и `tasks`
-* минимальный worker pipeline
-* первый реальный тип задачи: `fetch_page`
+Standard crawl worker:
 
-Что пока ещё не реализовано:
+```bash
+export RQ_QUEUE=crawl_default
+python -m app.worker
+```
 
-* полноценный crawl сайта
-* sitemap parsing
-* аудит страниц
-* генерация отчетов
-* интеграции с поисковыми системами
-* Telegram orchestration
+Heavy crawl worker:
 
----
+```bash
+export RQ_QUEUE=crawl_heavy
+python -m app.worker
+```
 
-## 🔮 Дальнейшее развитие
+## Configuration Notes
 
-* развитие task-системы и очередей
-* расширение типов задач (`crawl`, `audit`, `sitemap`, `reports`)
-* парсинг sitemap
-* crawl сайта
-* аудит
-* генерация отчетов
-* интеграции с поисковыми системами
-* Telegram orchestration поверх use cases
+Two crawl modes are supported:
 
----
+- standard mode for ordinary websites
+- heavy mode for large or sensitive websites
 
-## 🛠 Технологии
+Heavy mode is intended for slower, safer execution with independent queue isolation.
 
-* FastAPI
-* aiogram
-* PostgreSQL
-* Redis
-* SQLAlchemy 2.0
-* Alembic
-* RQ
-* Python 3.12+
+## Why Telegram
 
----
+Telegram is used as an operator console, not as a place for business logic.
 
-## 📎 Принцип
+That gives the project:
 
-> Сначала делаем правильную архитектуру — потом быстро добавляем фичи.
+- fast operational control
+- simple launch and status workflows
+- a practical interface for non-technical execution scenarios
+
+The system itself remains backend-first and can be extended through API and workers independently of Telegram.
+
+## Open Source Direction
+
+This repository is being prepared as a public open-source project focused on practical technical SEO automation workflows.
+
+The goal is to provide a modular foundation for:
+
+- crawl orchestration
+- SEO task execution
+- indexing workflows
+- audits
+- reporting
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
