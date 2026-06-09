@@ -1,0 +1,8 @@
+{$DOMAIN} {
+    encode gzip
+
+    @bot path /bot/*
+    reverse_proxy @bot bot_webhook:8001
+
+    reverse_proxy api:8000
+}

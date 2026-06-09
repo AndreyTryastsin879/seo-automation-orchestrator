@@ -16,6 +16,13 @@ def create_app() -> FastAPI:
     # can resolve string-based relationships across modules.
     configure_mappers()
     app = FastAPI(title="Mega Tools API")
+
+    @app.get("/health")
+    def healthcheck() -> dict[str, str]:
+        """Return a simple API healthcheck response."""
+
+        return {"status": "ok"}
+
     app.include_router(projects_router)
     app.include_router(tasks_router)
     return app
