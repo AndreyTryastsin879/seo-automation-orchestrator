@@ -65,6 +65,8 @@ The platform is intended to grow into a broader SEO automation system, including
 - chart generation for reports
 - more operational tooling exposed through Telegram and API
 
+See [ROADMAP.md](ROADMAP.md) for the current module sequence and near-term release direction.
+
 ## SEO Crawler
 
 The existing SEO crawler in this project is built on Python `asyncio`.
