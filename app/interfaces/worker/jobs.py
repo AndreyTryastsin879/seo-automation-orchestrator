@@ -28,6 +28,8 @@ from app.modules.tasks.infrastructure import Task, TaskFile, TaskFileRepository,
 
 HTTP_TIMEOUT_SECONDS = 15
 SITEMAP_ENTRY_LIMIT = 100
+SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS = 10
+SITEMAP_STATUS_CHECK_MAX_CONCURRENCY = 10
 MAX_REDIRECTS = 10
 CRAWL_PROGRESS_CHECKPOINT_EVERY_PAGES = 50
 NON_HTML_EXTENSIONS = {
@@ -51,6 +53,7 @@ class _TaskExecutionResult:
 
     result_payload: JsonPayload
     export_urls: list[str] | None = None
+    export_sitemap_rows: list[tuple[str, int | None]] | None = None
     export_csv_content: str | None = None
 
 
@@ -461,6 +464,15 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
 
     aggregation = _collect_sitemap_urls(url.strip(), visited=set())
     export_urls = aggregation["urls"] if aggregation["status_code"] == 200 else None
+    export_sitemap_rows = None
+    if export_urls is not None:
+        export_sitemap_rows = asyncio.run(
+            _resolve_sitemap_status_rows(
+                export_urls,
+                timeout_seconds=SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS,
+                max_concurrency=SITEMAP_STATUS_CHECK_MAX_CONCURRENCY,
+            )
+        )
     result_payload: JsonPayload = {
         "url": fetched.url,
         "final_url": aggregation["final_url"],
@@ -469,6 +481,7 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
         "sitemap_type": aggregation["sitemap_type"],
         "url_count": len(aggregation["urls"]),
         "urls": aggregation["urls"][:SITEMAP_ENTRY_LIMIT],
+        "resolved_status_count": 0 if export_sitemap_rows is None else len(export_sitemap_rows),
     }
     if aggregation["status_code"] != 200:
         result_payload = _with_diagnostic(
@@ -479,6 +492,7 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
     return _TaskExecutionResult(
         result_payload=result_payload,
         export_urls=export_urls,
+        export_sitemap_rows=export_sitemap_rows,
     )
 
 
@@ -1307,41 +1321,44 @@ def _persist_fetch_sitemap_artifacts(
 ) -> _TaskExecutionResult:
     """Persist sitemap CSV export and TaskFile metadata."""
 
-    if execution_result.export_urls is None:
+    if execution_result.export_sitemap_rows is None:
         return execution_result
 
     project_slug = _resolve_task_slug(task)
-    csv_relative_path = f"sitemap_parsing/{project_slug}_sitemap_urls.csv"
-    xlsx_relative_path = f"sitemap_parsing/{project_slug}_sitemap_urls.xlsx"
+    csv_relative_path = f"sitemap_parsing/{project_slug}.csv"
+    xlsx_relative_path = f"sitemap_parsing/{project_slug}.xlsx"
     storage = LocalFileStorage()
-    csv_content = _build_urls_csv(execution_result.export_urls)
+    csv_content = _build_sitemap_rows_csv(execution_result.export_sitemap_rows)
     csv_file = storage.write_text(csv_relative_path, csv_content, encoding="utf-8")
     xlsx_file = storage.write_bytes(
         xlsx_relative_path,
         _build_xlsx_bytes_from_rows(
-            rows=[["url"], *[[url] for url in execution_result.export_urls]],
+            rows=[
+                ["url", "Ответ сервера"],
+                *[
+                    [url, "" if status_code is None else status_code]
+                    for url, status_code in execution_result.export_sitemap_rows
+                ],
+            ],
             sheet_name="sitemap_urls",
         ),
     )
 
-    task_file_repository = TaskFileRepository(session)
-    task_file_repository.create(
-        TaskFile(
-            task_id=task.id,
-            file_name="sitemap_urls.csv",
-            file_path=csv_file.relative_path,
-            file_type="text/csv",
-            file_size=csv_file.size,
-        )
+    _upsert_task_file(
+        session=session,
+        task_id=task.id,
+        file_name=f"{project_slug}.csv",
+        file_path=csv_file.relative_path,
+        file_type="text/csv",
+        file_size=csv_file.size,
     )
-    task_file_repository.create(
-        TaskFile(
-            task_id=task.id,
-            file_name="sitemap_urls.xlsx",
-            file_path=xlsx_file.relative_path,
-            file_type="xlsx",
-            file_size=xlsx_file.size,
-        )
+    _upsert_task_file(
+        session=session,
+        task_id=task.id,
+        file_name=f"{project_slug}.xlsx",
+        file_path=xlsx_file.relative_path,
+        file_type="xlsx",
+        file_size=xlsx_file.size,
     )
 
     result_payload = dict(execution_result.result_payload)
@@ -1353,6 +1370,7 @@ def _persist_fetch_sitemap_artifacts(
     return _TaskExecutionResult(
         result_payload=result_payload,
         export_urls=execution_result.export_urls,
+        export_sitemap_rows=execution_result.export_sitemap_rows,
     )
 
 
@@ -1461,6 +1479,88 @@ def _build_urls_csv(urls: list[str]) -> str:
     for url in urls:
         writer.writerow([url])
     return buffer.getvalue()
+
+
+def _build_sitemap_rows_csv(rows: list[tuple[str, int | None]]) -> str:
+    """Build UTF-8 CSV content for sitemap URLs with server response codes."""
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["url", "Ответ сервера"])
+    for url, status_code in rows:
+        writer.writerow([url, "" if status_code is None else status_code])
+    return buffer.getvalue()
+
+
+async def _resolve_sitemap_status_rows(
+    urls: list[str],
+    *,
+    timeout_seconds: int,
+    max_concurrency: int,
+) -> list[tuple[str, int | None]]:
+    """Resolve lightweight server response codes for sitemap URLs."""
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def resolve_one(url: str) -> tuple[str, int | None]:
+        async with semaphore:
+            status_code = await asyncio.to_thread(
+                _fetch_status_code_only,
+                url,
+                timeout_seconds,
+            )
+            return (url, status_code)
+
+    return await asyncio.gather(*(resolve_one(url) for url in urls))
+
+
+def _fetch_status_code_only(url: str, timeout_seconds: int) -> int | None:
+    """Fetch only the response code for a URL without downloading full page content."""
+
+    status_code = _fetch_status_code_via_method(url, timeout_seconds=timeout_seconds, method="HEAD")
+    if status_code == 405:
+        status_code = _fetch_status_code_via_method(url, timeout_seconds=timeout_seconds, method="GET")
+    return status_code
+
+
+def _fetch_status_code_via_method(
+    url: str,
+    *,
+    timeout_seconds: int,
+    method: str,
+) -> int | None:
+    """Resolve one HTTP status code using a lightweight request method."""
+
+    current_url = url
+    opener = build_opener(_NoRedirectHandler())
+
+    for _ in range(MAX_REDIRECTS + 1):
+        request = Request(
+            current_url,
+            headers={
+                "User-Agent": "MegaToolsBot/0.1",
+                "Accept": "*/*",
+            },
+            method=method,
+        )
+        try:
+            response = opener.open(request, timeout=timeout_seconds)
+            try:
+                return response.status
+            finally:
+                response.close()
+        except HTTPError as error:
+            if 300 <= error.code < 400:
+                location = error.headers.get("Location")
+                if not location:
+                    return error.code
+                current_url = urljoin(current_url, location)
+                continue
+            return error.code
+        except URLError:
+            return None
+
+    return None
 
 
 def _resolve_task_slug(task: Task) -> str:

@@ -128,6 +128,15 @@ class AdHocCrawlLaunchResult:
 
 
 @dataclass(slots=True, frozen=True)
+class AdHocSitemapLaunchResult:
+    """Result of creating an ad-hoc sitemap parsing task from the bot."""
+
+    batch: TaskBatchDTO
+    task: TaskDTO
+    sitemap_url: str
+
+
+@dataclass(slots=True, frozen=True)
 class TaskStatusResult:
     """Task details prepared for Telegram responses."""
 
@@ -146,8 +155,27 @@ class ProjectCrawlLaunchResult:
 
 
 @dataclass(slots=True, frozen=True)
+class ProjectSitemapLaunchResult:
+    """Result of launching sitemap parsing for an existing project."""
+
+    batch: TaskBatchDTO
+    project: ProjectDTO
+    task: TaskDTO
+
+
+@dataclass(slots=True, frozen=True)
 class BulkProjectCrawlLaunchResult:
     """Result of launching crawl tasks for all projects."""
+
+    batch: TaskBatchDTO | None
+    total_projects: int
+    task_ids: list[int]
+    tasks: list[RecentTaskSummary]
+
+
+@dataclass(slots=True, frozen=True)
+class BulkProjectSitemapLaunchResult:
+    """Result of launching sitemap parsing tasks for all projects."""
 
     batch: TaskBatchDTO | None
     total_projects: int
@@ -212,6 +240,36 @@ def launch_ad_hoc_crawl(
             task=task,
             project_name=derived_project_name,
             start_url=normalized_start_url,
+        )
+    finally:
+        session.close()
+
+
+def launch_ad_hoc_sitemap(sitemap_url: str) -> AdHocSitemapLaunchResult:
+    """Create an ad-hoc sitemap parsing task without writing a project record."""
+
+    normalized_url = _ensure_absolute_url(sitemap_url)
+    session = SessionFactory()
+    try:
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.CRAWL_ADHOC,
+            title=f"Парсинг sitemap: {urlsplit(normalized_url).netloc.lower()}",
+            payload={"url": normalized_url},
+        )
+        task = _create_fetch_sitemap_task(
+            session=session,
+            batch_id=task_batch.id,
+            project_id=None,
+            sitemap_url=normalized_url,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+        )
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="fetch_sitemap")
+        return AdHocSitemapLaunchResult(
+            batch=task_batch,
+            task=task,
+            sitemap_url=normalized_url,
         )
     finally:
         session.close()
@@ -411,6 +469,41 @@ def launch_project_crawl(
         session.close()
 
 
+def launch_project_sitemap(project_id: int) -> ProjectSitemapLaunchResult | None:
+    """Create a sitemap parsing task for an existing project."""
+
+    session = SessionFactory()
+    try:
+        project_repository = ProjectRepository(session)
+        project = project_repository.get_by_id(project_id)
+        if project is None:
+            return None
+
+        sitemap_url = _resolve_project_sitemap_url(project.sitemap_path)
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.CRAWL_PROJECT,
+            title=f"Парсинг sitemap: {project.project_name}",
+            payload={
+                "project_id": project.id,
+                "project_name": project.project_name,
+                "url": sitemap_url,
+            },
+        )
+        task = _create_fetch_sitemap_task(
+            session=session,
+            batch_id=task_batch.id,
+            project_id=project.id,
+            sitemap_url=sitemap_url,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+        )
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="fetch_sitemap")
+        return ProjectSitemapLaunchResult(batch=task_batch, project=project, task=task)
+    finally:
+        session.close()
+
+
 def launch_all_projects_crawl(*, settings: CrawlLaunchSettings | None = None) -> BulkProjectCrawlLaunchResult:
     """Create crawl tasks for all default-segment projects."""
 
@@ -470,6 +563,66 @@ def launch_all_projects_crawl(*, settings: CrawlLaunchSettings | None = None) ->
         return BulkProjectCrawlLaunchResult(
             batch=task_batch,
             total_projects=len(projects),
+            task_ids=task_ids,
+            tasks=task_summaries,
+        )
+    finally:
+        session.close()
+
+
+def launch_all_projects_sitemap() -> BulkProjectSitemapLaunchResult:
+    """Create sitemap parsing tasks for all projects in default-then-heavy order."""
+
+    session = SessionFactory()
+    try:
+        project_repository = ProjectRepository(session)
+        all_projects = ListProjectsUseCase(project_repository).execute()
+        eligible_projects = [project for project in all_projects if project.sitemap_path]
+        eligible_projects.sort(key=lambda project: (project.crawl_segment == CrawlSegment.HEAVY, project.project_name.lower()))
+        if not eligible_projects:
+            return BulkProjectSitemapLaunchResult(
+                batch=None,
+                total_projects=0,
+                task_ids=[],
+                tasks=[],
+            )
+
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.CRAWL_ALL_PROJECTS,
+            title="Парсинг sitemap всех проектов",
+            payload={"project_ids": [project.id for project in eligible_projects]},
+        )
+
+        task_ids: list[int] = []
+        task_summaries: list[RecentTaskSummary] = []
+        for project in eligible_projects:
+            sitemap_url = _resolve_project_sitemap_url(project.sitemap_path)
+            task = _create_fetch_sitemap_task(
+                session=session,
+                batch_id=task_batch.id,
+                project_id=project.id,
+                sitemap_url=sitemap_url,
+                queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            )
+            task_ids.append(task.id)
+            task_summaries.append(
+                RecentTaskSummary(
+                    task_id=task.id,
+                    task_type=task.task_type,
+                    status=task.status.value,
+                    label=project.project_name,
+                )
+            )
+
+        session.commit()
+
+        for task_id in task_ids:
+            TaskQueue(queue_name=CRAWL_DEFAULT_QUEUE_NAME).enqueue(task_id, task_type="fetch_sitemap")
+
+        return BulkProjectSitemapLaunchResult(
+            batch=task_batch,
+            total_projects=len(eligible_projects),
             task_ids=task_ids,
             tasks=task_summaries,
         )
@@ -729,6 +882,29 @@ def _create_crawl_task(
     )
 
 
+def _create_fetch_sitemap_task(
+    *,
+    session,
+    batch_id: int | None,
+    project_id: int | None,
+    sitemap_url: str,
+    queue_name: str,
+) -> TaskDTO:
+    """Create a fetch_sitemap task through the application layer."""
+
+    task_repository = TaskRepository(session)
+    create_task = CreateTaskUseCase(task_repository)
+    return create_task.execute(
+        CreateTaskCommand(
+            batch_id=batch_id,
+            project_id=project_id,
+            queue_name=queue_name,
+            task_type="fetch_sitemap",
+            payload={"url": sitemap_url},
+        )
+    )
+
+
 def build_default_crawl_settings() -> CrawlLaunchSettings:
     """Return default-segment crawl settings."""
 
@@ -782,6 +958,14 @@ def _normalize_webmaster_host(start_url: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         raise ValueError("Укажи полный URL со схемой, например https://example.com")
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), "/", "", ""))
+
+
+def _resolve_project_sitemap_url(sitemap_path: str | None) -> str:
+    """Resolve and validate a project's sitemap URL."""
+
+    if not sitemap_path:
+        raise ValueError("У проекта не задан sitemap.")
+    return _ensure_absolute_url(sitemap_path)
 
 
 def _ensure_absolute_url(start_url: str) -> str:

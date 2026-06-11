@@ -15,8 +15,8 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
 
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Парсинг"), KeyboardButton(text="Проекты")],
-            [KeyboardButton(text="Статус")],
+            [KeyboardButton(text="Парсинг"), KeyboardButton(text="Парсинг sitemap")],
+            [KeyboardButton(text="Проекты"), KeyboardButton(text="Статус")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери раздел",
@@ -45,6 +45,16 @@ def build_adhoc_profile_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Обычные настройки", callback_data="parsing:adhoc:default")
     builder.button(text="Heavy-настройки", callback_data="parsing:adhoc:heavy")
     builder.button(text="Отмена", callback_data="parsing:adhoc:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_sitemap_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build context actions for the sitemap parsing section."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Выбрать проект", callback_data="sitemap:projects")
+    builder.button(text="Свой URL", callback_data="sitemap:adhoc")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -168,6 +178,21 @@ def build_project_selection_keyboard(projects: list[ProjectDTO]) -> InlineKeyboa
             callback_data=f"parsing:project:{project.id}",
         )
     builder.button(text="Парсить все", callback_data="parsing:all")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_sitemap_project_selection_keyboard(projects: list[ProjectDTO]) -> InlineKeyboardMarkup:
+    """Build an inline keyboard for choosing a project for sitemap parsing."""
+
+    builder = InlineKeyboardBuilder()
+    for project in projects:
+        suffix = " [heavy]" if project.crawl_segment.value == "heavy" else ""
+        builder.button(
+            text=f"{project.project_name}{suffix}",
+            callback_data=f"sitemap:project:{project.id}",
+        )
+    builder.button(text="Парсить все", callback_data="sitemap:all")
     builder.adjust(1)
     return builder.as_markup()
 

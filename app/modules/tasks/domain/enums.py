@@ -9,6 +9,9 @@ class TaskBatchType(StrEnum):
     CRAWL_ALL_PROJECTS = "crawl_all_projects"
     CRAWL_PROJECT = "crawl_project"
     CRAWL_ADHOC = "crawl_adhoc"
+    SITEMAP_ALL_PROJECTS = "sitemap_all_projects"
+    SITEMAP_PROJECT = "sitemap_project"
+    SITEMAP_ADHOC = "sitemap_adhoc"
 
 
 class TaskBatchStatus(StrEnum):
