@@ -71,6 +71,7 @@ DEFAULT_HEAVY_CRAWL_REQUEST_TIMEOUT_SECONDS = 20
 DEFAULT_HEAVY_CRAWL_RETRY_ON_5XX = True
 DEFAULT_HEAVY_CRAWL_MAX_5XX_BEFORE_STOP = 10
 DEFAULT_HEAVY_CRAWL_RETRY_DELAY_MS = 5000
+DEFAULT_SITEMAP_RESOLVE_STATUS_CODES = True
 
 
 @dataclass(slots=True, frozen=True)
@@ -244,8 +245,11 @@ def launch_ad_hoc_crawl(
     finally:
         session.close()
 
-
-def launch_ad_hoc_sitemap(sitemap_url: str) -> AdHocSitemapLaunchResult:
+def launch_ad_hoc_sitemap(
+    sitemap_url: str,
+    *,
+    resolve_status_codes: bool = DEFAULT_SITEMAP_RESOLVE_STATUS_CODES,
+) -> AdHocSitemapLaunchResult:
     """Create an ad-hoc sitemap parsing task without writing a project record."""
 
     normalized_url = _ensure_absolute_url(sitemap_url)
@@ -255,13 +259,17 @@ def launch_ad_hoc_sitemap(sitemap_url: str) -> AdHocSitemapLaunchResult:
             session=session,
             batch_type=TaskBatchType.CRAWL_ADHOC,
             title=f"Парсинг sitemap: {urlsplit(normalized_url).netloc.lower()}",
-            payload={"url": normalized_url},
+            payload={
+                "url": normalized_url,
+                "resolve_status_codes": resolve_status_codes,
+            },
         )
         task = _create_fetch_sitemap_task(
             session=session,
             batch_id=task_batch.id,
             project_id=None,
             sitemap_url=normalized_url,
+            resolve_status_codes=resolve_status_codes,
             queue_name=CRAWL_DEFAULT_QUEUE_NAME,
         )
         session.commit()
@@ -469,7 +477,11 @@ def launch_project_crawl(
         session.close()
 
 
-def launch_project_sitemap(project_id: int) -> ProjectSitemapLaunchResult | None:
+def launch_project_sitemap(
+    project_id: int,
+    *,
+    resolve_status_codes: bool = DEFAULT_SITEMAP_RESOLVE_STATUS_CODES,
+) -> ProjectSitemapLaunchResult | None:
     """Create a sitemap parsing task for an existing project."""
 
     session = SessionFactory()
@@ -488,6 +500,7 @@ def launch_project_sitemap(project_id: int) -> ProjectSitemapLaunchResult | None
                 "project_id": project.id,
                 "project_name": project.project_name,
                 "url": sitemap_url,
+                "resolve_status_codes": resolve_status_codes,
             },
         )
         task = _create_fetch_sitemap_task(
@@ -495,6 +508,7 @@ def launch_project_sitemap(project_id: int) -> ProjectSitemapLaunchResult | None
             batch_id=task_batch.id,
             project_id=project.id,
             sitemap_url=sitemap_url,
+            resolve_status_codes=resolve_status_codes,
             queue_name=CRAWL_DEFAULT_QUEUE_NAME,
         )
         session.commit()
@@ -570,7 +584,10 @@ def launch_all_projects_crawl(*, settings: CrawlLaunchSettings | None = None) ->
         session.close()
 
 
-def launch_all_projects_sitemap() -> BulkProjectSitemapLaunchResult:
+def launch_all_projects_sitemap(
+    *,
+    resolve_status_codes: bool = DEFAULT_SITEMAP_RESOLVE_STATUS_CODES,
+) -> BulkProjectSitemapLaunchResult:
     """Create sitemap parsing tasks for all projects in default-then-heavy order."""
 
     session = SessionFactory()
@@ -591,7 +608,10 @@ def launch_all_projects_sitemap() -> BulkProjectSitemapLaunchResult:
             session=session,
             batch_type=TaskBatchType.CRAWL_ALL_PROJECTS,
             title="Парсинг sitemap всех проектов",
-            payload={"project_ids": [project.id for project in eligible_projects]},
+            payload={
+                "project_ids": [project.id for project in eligible_projects],
+                "resolve_status_codes": resolve_status_codes,
+            },
         )
 
         task_ids: list[int] = []
@@ -603,6 +623,7 @@ def launch_all_projects_sitemap() -> BulkProjectSitemapLaunchResult:
                 batch_id=task_batch.id,
                 project_id=project.id,
                 sitemap_url=sitemap_url,
+                resolve_status_codes=resolve_status_codes,
                 queue_name=CRAWL_DEFAULT_QUEUE_NAME,
             )
             task_ids.append(task.id)
@@ -888,6 +909,7 @@ def _create_fetch_sitemap_task(
     batch_id: int | None,
     project_id: int | None,
     sitemap_url: str,
+    resolve_status_codes: bool,
     queue_name: str,
 ) -> TaskDTO:
     """Create a fetch_sitemap task through the application layer."""
@@ -900,7 +922,10 @@ def _create_fetch_sitemap_task(
             project_id=project_id,
             queue_name=queue_name,
             task_type="fetch_sitemap",
-            payload={"url": sitemap_url},
+            payload={
+                "url": sitemap_url,
+                "resolve_status_codes": resolve_status_codes,
+            },
         )
     )
 

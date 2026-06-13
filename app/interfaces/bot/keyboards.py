@@ -55,6 +55,20 @@ def build_sitemap_actions_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Выбрать проект", callback_data="sitemap:projects")
     builder.button(text="Свой URL", callback_data="sitemap:adhoc")
+    builder.button(text="Настройки", callback_data="sitemap:settings")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_sitemap_settings_keyboard(*, resolve_status_codes: bool) -> InlineKeyboardMarkup:
+    """Build sitemap parsing settings keyboard."""
+
+    builder = InlineKeyboardBuilder()
+    state_text = "ON" if resolve_status_codes else "OFF"
+    builder.button(
+        text=f"Определять код ответа сервера: {state_text}",
+        callback_data="sitemap:settings:toggle:resolve_status_codes",
+    )
     builder.adjust(1)
     return builder.as_markup()
 

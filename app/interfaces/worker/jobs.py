@@ -438,6 +438,7 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
     url = payload.get("url")
     if not isinstance(url, str) or not url.strip():
         raise ValueError("fetch_sitemap payload must contain non-empty string field 'url'.")
+    resolve_status_codes = bool(payload.get("resolve_status_codes", True))
 
     fetched = _fetch_url(url.strip(), error_prefix="fetch_sitemap")
 
@@ -466,13 +467,16 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
     export_urls = aggregation["urls"] if aggregation["status_code"] == 200 else None
     export_sitemap_rows = None
     if export_urls is not None:
-        export_sitemap_rows = asyncio.run(
-            _resolve_sitemap_status_rows(
-                export_urls,
-                timeout_seconds=SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS,
-                max_concurrency=SITEMAP_STATUS_CHECK_MAX_CONCURRENCY,
+        if resolve_status_codes:
+            export_sitemap_rows = asyncio.run(
+                _resolve_sitemap_status_rows(
+                    export_urls,
+                    timeout_seconds=SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS,
+                    max_concurrency=SITEMAP_STATUS_CHECK_MAX_CONCURRENCY,
+                )
             )
-        )
+        else:
+            export_sitemap_rows = [(item_url, None) for item_url in export_urls]
     result_payload: JsonPayload = {
         "url": fetched.url,
         "final_url": aggregation["final_url"],
@@ -481,7 +485,8 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
         "sitemap_type": aggregation["sitemap_type"],
         "url_count": len(aggregation["urls"]),
         "urls": aggregation["urls"][:SITEMAP_ENTRY_LIMIT],
-        "resolved_status_count": 0 if export_sitemap_rows is None else len(export_sitemap_rows),
+        "resolved_status_count": len(export_urls) if resolve_status_codes and export_urls is not None else 0,
+        "resolve_status_codes": resolve_status_codes,
     }
     if aggregation["status_code"] != 200:
         result_payload = _with_diagnostic(

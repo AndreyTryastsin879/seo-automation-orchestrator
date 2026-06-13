@@ -34,6 +34,7 @@ from app.interfaces.bot.keyboards import (
     build_recent_tasks_keyboard,
     build_sitemap_actions_keyboard,
     build_sitemap_project_selection_keyboard,
+    build_sitemap_settings_keyboard,
     build_status_actions_keyboard,
 )
 from app.interfaces.bot.services import (
@@ -63,6 +64,7 @@ router = Router(name="main_bot")
 CRAWL_SETTINGS_STATE_KEY = "crawl_settings"
 HEAVY_CRAWL_SETTINGS_STATE_KEY = "heavy_crawl_settings"
 ADHOC_CRAWL_PROFILE_STATE_KEY = "adhoc_crawl_profile"
+SITEMAP_SETTINGS_STATE_KEY = "sitemap_settings"
 HEAVY_CONCURRENCY_OPTIONS = (1, 2, 3, 4, 5)
 HEAVY_PAGE_OPTIONS = (5000, 25000, 100000, 150000, 200000, 250000)
 HEAVY_DELAY_OPTIONS = (250, 500, 1000, 2000, 5000)
@@ -304,7 +306,10 @@ async def handle_sitemap_all_projects(callback: CallbackQuery, state: FSMContext
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
     try:
-        result = launch_all_projects_sitemap()
+        sitemap_settings = await _get_sitemap_settings(state)
+        result = launch_all_projects_sitemap(
+            resolve_status_codes=sitemap_settings["resolve_status_codes"],
+        )
     except ValueError as exc:
         await callback.message.answer(str(exc))
         return
@@ -324,6 +329,25 @@ async def handle_sitemap_all_projects(callback: CallbackQuery, state: FSMContext
         "Сначала будут обработаны обычные проекты, затем heavy.\n"
         "Проверить запуск можно через раздел Статус.",
     )
+
+
+@router.callback_query(F.data == "sitemap:settings")
+async def handle_sitemap_settings(callback: CallbackQuery, state: FSMContext) -> None:
+    """Show sitemap parsing settings."""
+
+    await callback.answer()
+    await _send_sitemap_settings(callback.message, state)
+
+
+@router.callback_query(F.data == "sitemap:settings:toggle:resolve_status_codes")
+async def handle_sitemap_settings_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    """Toggle sitemap server-response-code resolution."""
+
+    await callback.answer()
+    settings = await _get_sitemap_settings(state)
+    settings["resolve_status_codes"] = not settings["resolve_status_codes"]
+    await _set_sitemap_settings(state, settings)
+    await _send_sitemap_settings(callback.message, state)
 
 
 @router.callback_query(F.data == "parsing:adhoc:cancel")
@@ -625,7 +649,11 @@ async def handle_sitemap_project_launch(callback: CallbackQuery, state: FSMConte
         return
 
     try:
-        result = launch_project_sitemap(project_id)
+        sitemap_settings = await _get_sitemap_settings(state)
+        result = launch_project_sitemap(
+            project_id,
+            resolve_status_codes=sitemap_settings["resolve_status_codes"],
+        )
     except ValueError as exc:
         await callback.message.answer(str(exc))
         return
@@ -1000,7 +1028,11 @@ async def handle_adhoc_sitemap_url_input(message: Message, state: FSMContext) ->
         return
 
     try:
-        result = launch_ad_hoc_sitemap(raw_text)
+        sitemap_settings = await _get_sitemap_settings(state)
+        result = launch_ad_hoc_sitemap(
+            raw_text,
+            resolve_status_codes=sitemap_settings["resolve_status_codes"],
+        )
     except ValueError as exc:
         await message.answer(str(exc))
         return
@@ -1102,6 +1134,23 @@ async def _send_heavy_parsing_settings(message: Message, state: FSMContext) -> N
         "- пауза retry задает ожидание перед повторной попыткой\n\n"
         "Нажми на нужный пункт ниже.",
         reply_markup=build_heavy_settings_menu_keyboard(settings),
+    )
+
+
+async def _send_sitemap_settings(message: Message, state: FSMContext) -> None:
+    """Send current sitemap parsing settings."""
+
+    settings = await _get_sitemap_settings(state)
+    resolve_status_codes = settings["resolve_status_codes"]
+    await _edit_or_answer(
+        message,
+        "Настройки парсинга sitemap:\n\n"
+        f"- определять код ответа сервера: {'да' if resolve_status_codes else 'нет'}\n\n"
+        "Если настройка выключена, sitemap будет разбираться и выгружаться без проверки HTTP-статуса каждой URL. "
+        "Это особенно полезно для очень больших карт сайта.",
+        reply_markup=build_sitemap_settings_keyboard(
+            resolve_status_codes=resolve_status_codes,
+        ),
     )
 
 
@@ -1293,6 +1342,18 @@ async def _get_adhoc_crawl_settings(state: FSMContext) -> CrawlLaunchSettings:
     return await _get_crawl_settings(state)
 
 
+async def _get_sitemap_settings(state: FSMContext) -> dict[str, bool]:
+    """Load sitemap parsing settings from FSM context or return defaults."""
+
+    data = await state.get_data()
+    raw_settings = data.get(SITEMAP_SETTINGS_STATE_KEY)
+    if not isinstance(raw_settings, dict):
+        return {"resolve_status_codes": True}
+    return {
+        "resolve_status_codes": bool(raw_settings.get("resolve_status_codes", True)),
+    }
+
+
 async def _set_crawl_settings(state: FSMContext, settings: CrawlLaunchSettings) -> None:
     """Persist crawl settings in FSM context."""
 
@@ -1333,14 +1394,28 @@ async def _set_heavy_crawl_settings(state: FSMContext, settings: CrawlLaunchSett
     )
 
 
+async def _set_sitemap_settings(state: FSMContext, settings: dict[str, bool]) -> None:
+    """Persist sitemap parsing settings in FSM context."""
+
+    await state.update_data(
+        {
+            SITEMAP_SETTINGS_STATE_KEY: {
+                "resolve_status_codes": bool(settings.get("resolve_status_codes", True)),
+            }
+        }
+    )
+
+
 async def _clear_flow_state_preserving_settings(state: FSMContext) -> None:
     """Clear conversational state while keeping crawl settings."""
 
     settings = await _get_crawl_settings(state)
     heavy_settings = await _get_heavy_crawl_settings(state)
+    sitemap_settings = await _get_sitemap_settings(state)
     await state.clear()
     await _set_crawl_settings(state, settings)
     await _set_heavy_crawl_settings(state, heavy_settings)
+    await _set_sitemap_settings(state, sitemap_settings)
 
 
 def _format_crawl_settings(settings: CrawlLaunchSettings) -> str:
@@ -1386,10 +1461,28 @@ def _format_task_progress(result_payload: object) -> list[str]:
 
     pages_crawled = result_payload.get("pages_crawled")
     pages_discovered = result_payload.get("pages_discovered")
-    if not isinstance(pages_crawled, int) and not isinstance(pages_discovered, int):
+    url_count = result_payload.get("url_count")
+    resolve_status_codes = result_payload.get("resolve_status_codes")
+    resolved_status_count = result_payload.get("resolved_status_count")
+
+    if (
+        not isinstance(pages_crawled, int)
+        and not isinstance(pages_discovered, int)
+        and not isinstance(url_count, int)
+    ):
         return []
 
     lines: list[str] = []
+    if isinstance(url_count, int):
+        lines.append(f"- найдено URL в sitemap: {url_count}")
+        if isinstance(resolve_status_codes, bool):
+            lines.append(
+                "- определение кода ответа сервера: "
+                + ("включено" if resolve_status_codes else "выключено")
+            )
+        if isinstance(resolved_status_count, int) and resolve_status_codes:
+            lines.append(f"- URL с определённым кодом ответа: {resolved_status_count}")
+
     if isinstance(pages_crawled, int):
         lines.append(f"- последняя точка сохранения: {pages_crawled} страниц")
     if isinstance(pages_discovered, int):
