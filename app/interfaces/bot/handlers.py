@@ -34,10 +34,13 @@ from app.interfaces.bot.keyboards import (
     build_recent_tasks_keyboard,
     build_sitemap_actions_keyboard,
     build_sitemap_project_selection_keyboard,
+    build_sitemap_robots_actions_keyboard,
     build_sitemap_settings_keyboard,
+    build_robots_project_selection_keyboard,
     build_status_actions_keyboard,
 )
 from app.interfaces.bot.services import (
+    launch_ad_hoc_robots,
     launch_ad_hoc_sitemap,
     launch_all_projects_sitemap,
     CrawlLaunchSettings,
@@ -52,6 +55,7 @@ from app.interfaces.bot.services import (
     get_task_status,
     launch_all_projects_crawl,
     launch_project_crawl,
+    launch_project_robots,
     launch_project_sitemap,
     launch_ad_hoc_crawl,
     list_all_projects,
@@ -81,6 +85,12 @@ class AdHocCrawlStates(StatesGroup):
 
 class AdHocSitemapStates(StatesGroup):
     """FSM states for launching an ad-hoc sitemap parsing task."""
+
+    waiting_for_url = State()
+
+
+class AdHocRobotsStates(StatesGroup):
+    """FSM states for launching an ad-hoc robots parsing task."""
 
     waiting_for_url = State()
 
@@ -295,6 +305,51 @@ async def handle_sitemap_adhoc(callback: CallbackQuery, state: FSMContext) -> No
     await callback.message.answer(
         "Пришли полный URL sitemap.\n\n"
         "Пример: https://example.com/sitemap.xml\n\n"
+        "Для отмены отправь /cancel.",
+    )
+
+
+@router.callback_query(F.data == "sitemap:robots")
+async def handle_sitemap_robots_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Open robots.txt-based sitemap discovery actions."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        "Парсинг robots.txt.\nВыбери, откуда запускать проверку.",
+        reply_markup=build_sitemap_robots_actions_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "sitemap:robots:projects")
+async def handle_sitemap_robots_projects(callback: CallbackQuery, state: FSMContext) -> None:
+    """Show projects for robots.txt parsing."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    projects = list_all_projects()
+    if not projects:
+        await callback.message.answer("Список проектов пока пуст.")
+        return
+
+    await callback.message.answer(
+        "Выбери проект для парсинга robots.txt.",
+        reply_markup=build_robots_project_selection_keyboard(projects),
+    )
+
+
+@router.callback_query(F.data == "sitemap:robots:adhoc")
+async def handle_sitemap_robots_adhoc(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start ad-hoc robots parsing by URL."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await state.set_state(AdHocRobotsStates.waiting_for_url)
+    await callback.message.answer(
+        "Пришли URL сайта или robots.txt.\n\n"
+        "Примеры:\n"
+        "- https://example.com\n"
+        "- https://example.com/robots.txt\n\n"
         "Для отмены отправь /cancel.",
     )
 
@@ -667,6 +722,43 @@ async def handle_sitemap_project_launch(callback: CallbackQuery, state: FSMConte
 
     await callback.message.answer(
         "Парсинг sitemap запущен.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проект: {result.project.project_name}\n"
+        f"Task ID: {result.task.id}\n"
+        f"Тип задачи: {result.task.task_type}\n"
+        f"Статус: {result.task.status.value}\n\n"
+        "Проверить запуск можно через раздел Статус.",
+    )
+
+
+@router.callback_query(F.data.startswith("sitemap:robots:project:"))
+async def handle_robots_project_launch(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch robots parsing for a selected project."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    project_id_raw = callback.data.rsplit(":", 1)[-1]
+    try:
+        project_id = int(project_id_raw)
+    except ValueError:
+        await callback.message.answer("Не удалось определить проект для парсинга robots.txt.")
+        return
+
+    try:
+        result = launch_project_robots(project_id)
+    except ValueError as exc:
+        await callback.message.answer(str(exc))
+        return
+    except Exception:
+        await callback.message.answer("Не удалось запустить парсинг robots.txt.")
+        return
+
+    if result is None:
+        await callback.message.answer("Проект не найден.")
+        return
+
+    await callback.message.answer(
+        "Парсинг robots.txt запущен.\n\n"
         f"ID запуска: {result.batch.id}\n"
         f"Проект: {result.project.project_name}\n"
         f"Task ID: {result.task.id}\n"
@@ -1055,6 +1147,43 @@ async def handle_adhoc_sitemap_url_input(message: Message, state: FSMContext) ->
     )
 
 
+@router.message(AdHocRobotsStates.waiting_for_url)
+async def handle_adhoc_robots_url_input(message: Message, state: FSMContext) -> None:
+    """Create an ad-hoc robots parsing task from a user-provided URL."""
+
+    raw_text = (message.text or "").strip()
+    if not raw_text:
+        await message.answer("Не вижу URL. Отправь адрес сайта или robots.txt.")
+        return
+
+    if raw_text.startswith("/"):
+        await message.answer("Сначала заверши текущий сценарий через /cancel или пришли URL.")
+        return
+
+    try:
+        result = launch_ad_hoc_robots(raw_text)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    except Exception:
+        await message.answer(
+            "Не удалось запустить парсинг robots.txt. Попробуй ещё раз чуть позже."
+        )
+        return
+
+    await _clear_flow_state_preserving_settings(state)
+    await message.answer(
+        "Парсинг robots.txt запущен.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Robots URL: {result.robots_url}\n"
+        f"Task ID: {result.task.id}\n"
+        f"Тип задачи: {result.task.task_type}\n"
+        f"Статус: {result.task.status.value}\n\n"
+        "Проверить запуск можно через раздел Статус.",
+        reply_markup=build_main_menu_keyboard(),
+    )
+
+
 @router.message(TaskStatusStates.waiting_for_task_id)
 async def handle_task_status_input(message: Message, state: FSMContext) -> None:
     """Check a task status and send its XLSX file when available."""
@@ -1301,7 +1430,10 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         return
 
     if not has_xlsx and not has_csv:
-        lines.extend(["", "Парсинг завершён, но файлы результата пока не найдены."])
+        if task.task_type == "fetch_robots":
+            lines.extend(["", "Парсинг robots.txt завершён."])
+        else:
+            lines.extend(["", "Парсинг завершён, но файлы результата пока не найдены."])
         reply_markup = build_main_menu_keyboard() if clear_to_menu else None
         await message.answer("\n".join(lines), reply_markup=reply_markup)
         return
@@ -1464,15 +1596,27 @@ def _format_task_progress(result_payload: object) -> list[str]:
     url_count = result_payload.get("url_count")
     resolve_status_codes = result_payload.get("resolve_status_codes")
     resolved_status_count = result_payload.get("resolved_status_count")
+    status_code = result_payload.get("status_code")
+    sitemap_type = result_payload.get("sitemap_type")
+    sitemaps = result_payload.get("sitemaps")
+    rules = result_payload.get("rules")
+    final_url = result_payload.get("final_url")
 
     if (
         not isinstance(pages_crawled, int)
         and not isinstance(pages_discovered, int)
         and not isinstance(url_count, int)
+        and not isinstance(status_code, int)
     ):
         return []
 
     lines: list[str] = []
+    if isinstance(status_code, int):
+        lines.append(f"- HTTP-статус: {status_code}")
+    if isinstance(final_url, str) and final_url:
+        lines.append(f"- итоговый URL: {final_url}")
+    if isinstance(sitemap_type, str) and sitemap_type:
+        lines.append(f"- тип sitemap: {sitemap_type}")
     if isinstance(url_count, int):
         lines.append(f"- найдено URL в sitemap: {url_count}")
         if isinstance(resolve_status_codes, bool):
@@ -1503,6 +1647,15 @@ def _format_task_progress(result_payload: object) -> list[str]:
             lines.append(f"- последний URL: {last_processed_url}")
         if isinstance(last_checkpoint_at, str) and last_checkpoint_at:
             lines.append(f"- checkpoint: {last_checkpoint_at}")
+
+    if isinstance(sitemaps, list):
+        lines.append(f"- sitemap-директив найдено: {len(sitemaps)}")
+        preview = [item for item in sitemaps[:3] if isinstance(item, str) and item]
+        if preview:
+            lines.append(f"- первые sitemap: {', '.join(preview)}")
+
+    if isinstance(rules, list):
+        lines.append(f"- групп правил найдено: {len(rules)}")
 
     return lines
 

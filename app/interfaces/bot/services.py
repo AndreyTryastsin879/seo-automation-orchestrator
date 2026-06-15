@@ -138,6 +138,15 @@ class AdHocSitemapLaunchResult:
 
 
 @dataclass(slots=True, frozen=True)
+class AdHocRobotsLaunchResult:
+    """Result of creating an ad-hoc robots parsing task from the bot."""
+
+    batch: TaskBatchDTO
+    task: TaskDTO
+    robots_url: str
+
+
+@dataclass(slots=True, frozen=True)
 class TaskStatusResult:
     """Task details prepared for Telegram responses."""
 
@@ -158,6 +167,15 @@ class ProjectCrawlLaunchResult:
 @dataclass(slots=True, frozen=True)
 class ProjectSitemapLaunchResult:
     """Result of launching sitemap parsing for an existing project."""
+
+    batch: TaskBatchDTO
+    project: ProjectDTO
+    task: TaskDTO
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectRobotsLaunchResult:
+    """Result of launching robots parsing for an existing project."""
 
     batch: TaskBatchDTO
     project: ProjectDTO
@@ -278,6 +296,36 @@ def launch_ad_hoc_sitemap(
             batch=task_batch,
             task=task,
             sitemap_url=normalized_url,
+        )
+    finally:
+        session.close()
+
+
+def launch_ad_hoc_robots(robots_url: str) -> AdHocRobotsLaunchResult:
+    """Create an ad-hoc robots parsing task without writing a project record."""
+
+    normalized_url = _ensure_absolute_url(robots_url)
+    session = SessionFactory()
+    try:
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.CRAWL_ADHOC,
+            title=f"Парсинг robots.txt: {urlsplit(normalized_url).netloc.lower()}",
+            payload={"url": normalized_url},
+        )
+        task = _create_fetch_robots_task(
+            session=session,
+            batch_id=task_batch.id,
+            project_id=None,
+            robots_url=normalized_url,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+        )
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="fetch_robots")
+        return AdHocRobotsLaunchResult(
+            batch=task_batch,
+            task=task,
+            robots_url=normalized_url,
         )
     finally:
         session.close()
@@ -514,6 +562,44 @@ def launch_project_sitemap(
         session.commit()
         TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="fetch_sitemap")
         return ProjectSitemapLaunchResult(batch=task_batch, project=project, task=task)
+    finally:
+        session.close()
+
+
+def launch_project_robots(project_id: int) -> ProjectRobotsLaunchResult | None:
+    """Create a robots parsing task for an existing project."""
+
+    session = SessionFactory()
+    try:
+        project_repository = ProjectRepository(session)
+        project = project_repository.get_by_id(project_id)
+        if project is None:
+            return None
+
+        start_url = _resolve_project_start_url(
+            start_url=project.start_url,
+            sitemap_path=project.sitemap_path,
+        )
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.CRAWL_PROJECT,
+            title=f"Парсинг robots.txt: {project.project_name}",
+            payload={
+                "project_id": project.id,
+                "project_name": project.project_name,
+                "url": start_url,
+            },
+        )
+        task = _create_fetch_robots_task(
+            session=session,
+            batch_id=task_batch.id,
+            project_id=project.id,
+            robots_url=start_url,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+        )
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="fetch_robots")
+        return ProjectRobotsLaunchResult(batch=task_batch, project=project, task=task)
     finally:
         session.close()
 
@@ -926,6 +1012,29 @@ def _create_fetch_sitemap_task(
                 "url": sitemap_url,
                 "resolve_status_codes": resolve_status_codes,
             },
+        )
+    )
+
+
+def _create_fetch_robots_task(
+    *,
+    session,
+    batch_id: int | None,
+    project_id: int | None,
+    robots_url: str,
+    queue_name: str,
+) -> TaskDTO:
+    """Create a fetch_robots task through the application layer."""
+
+    task_repository = TaskRepository(session)
+    create_task = CreateTaskUseCase(task_repository)
+    return create_task.execute(
+        CreateTaskCommand(
+            batch_id=batch_id,
+            project_id=project_id,
+            queue_name=queue_name,
+            task_type="fetch_robots",
+            payload={"url": robots_url},
         )
     )
 

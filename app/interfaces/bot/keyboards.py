@@ -55,6 +55,7 @@ def build_sitemap_actions_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Выбрать проект", callback_data="sitemap:projects")
     builder.button(text="Свой URL", callback_data="sitemap:adhoc")
+    builder.button(text="Из robots.txt", callback_data="sitemap:robots")
     builder.button(text="Настройки", callback_data="sitemap:settings")
     builder.adjust(1)
     return builder.as_markup()
@@ -69,6 +70,16 @@ def build_sitemap_settings_keyboard(*, resolve_status_codes: bool) -> InlineKeyb
         text=f"Определять код ответа сервера: {state_text}",
         callback_data="sitemap:settings:toggle:resolve_status_codes",
     )
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_sitemap_robots_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build actions for robots.txt-based sitemap discovery."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Выбрать проект", callback_data="sitemap:robots:projects")
+    builder.button(text="Свой URL", callback_data="sitemap:robots:adhoc")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -207,6 +218,20 @@ def build_sitemap_project_selection_keyboard(projects: list[ProjectDTO]) -> Inli
             callback_data=f"sitemap:project:{project.id}",
         )
     builder.button(text="Парсить все", callback_data="sitemap:all")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_robots_project_selection_keyboard(projects: list[ProjectDTO]) -> InlineKeyboardMarkup:
+    """Build an inline keyboard for choosing a project for robots.txt parsing."""
+
+    builder = InlineKeyboardBuilder()
+    for project in projects:
+        suffix = " [heavy]" if project.crawl_segment.value == "heavy" else ""
+        builder.button(
+            text=f"{project.project_name}{suffix}",
+            callback_data=f"sitemap:robots:project:{project.id}",
+        )
     builder.adjust(1)
     return builder.as_markup()
 
