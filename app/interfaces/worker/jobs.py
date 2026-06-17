@@ -54,6 +54,7 @@ class _TaskExecutionResult:
     result_payload: JsonPayload
     export_urls: list[str] | None = None
     export_sitemap_rows: list[tuple[str, int | None]] | None = None
+    export_robots_rows: list[tuple[str, str, str, str]] | None = None
     export_csv_content: str | None = None
 
 
@@ -306,6 +307,12 @@ def execute_task(task_id: int) -> None:
                 task=task,
                 execution_result=execution_result,
             )
+        if task.task_type == "fetch_robots":
+            execution_result = _persist_fetch_robots_artifacts(
+                session=session,
+                task=task,
+                execution_result=execution_result,
+            )
         if task.task_type == "crawl_site":
             execution_result = _persist_crawl_site_artifacts(
                 session=session,
@@ -334,6 +341,12 @@ def execute_task(task_id: int) -> None:
                 execution_result = error.execution_result
                 if task is not None and task.task_type == "fetch_sitemap":
                     execution_result = _persist_fetch_sitemap_artifacts(
+                        session=session,
+                        task=task,
+                        execution_result=execution_result,
+                    )
+                if task is not None and task.task_type == "fetch_robots":
+                    execution_result = _persist_fetch_robots_artifacts(
                         session=session,
                         task=task,
                         execution_result=execution_result,
@@ -517,6 +530,7 @@ def _execute_fetch_robots_task(payload: JsonPayload | None) -> _TaskExecutionRes
     encoding = _extract_charset(fetched.content_type) or "utf-8"
     body_text = fetched.body.decode(encoding, errors="replace")
     parsed_robots = _parse_robots_txt(body_text)
+    export_rows = _build_robots_export_rows(parsed_robots)
 
     result_payload: JsonPayload = {
         "url": url.strip(),
@@ -527,6 +541,8 @@ def _execute_fetch_robots_task(payload: JsonPayload | None) -> _TaskExecutionRes
         "user_agents": parsed_robots["user_agents"],
         "sitemaps": parsed_robots["sitemaps"],
         "rules": parsed_robots["rules"],
+        "sitemap_directive_count": len(parsed_robots["sitemaps"]),
+        "rule_group_count": len(parsed_robots["rules"]),
     }
 
     if fetched.status_code == 404:
@@ -546,7 +562,10 @@ def _execute_fetch_robots_task(payload: JsonPayload | None) -> _TaskExecutionRes
             "В robots.txt не найдено ни одного правила или sitemap-директивы.",
         )
 
-    return _TaskExecutionResult(result_payload=result_payload)
+    return _TaskExecutionResult(
+        result_payload=result_payload,
+        export_robots_rows=export_rows,
+    )
 
 
 def _execute_crawl_site_task(task_id: int, payload: JsonPayload | None) -> _TaskExecutionResult:
@@ -1379,6 +1398,66 @@ def _persist_fetch_sitemap_artifacts(
     )
 
 
+def _persist_fetch_robots_artifacts(
+    *,
+    session,
+    task: Task,
+    execution_result: _TaskExecutionResult,
+) -> _TaskExecutionResult:
+    """Persist robots.txt CSV/XLSX export and TaskFile metadata."""
+
+    if execution_result.export_robots_rows is None:
+        return execution_result
+
+    project_slug = _resolve_task_slug(task)
+    csv_relative_path = f"robots_parsing/{project_slug}.csv"
+    xlsx_relative_path = f"robots_parsing/{project_slug}.xlsx"
+    storage = LocalFileStorage()
+    csv_content = _build_robots_rows_csv(execution_result.export_robots_rows)
+    csv_file = storage.write_text(csv_relative_path, csv_content, encoding="utf-8")
+    xlsx_file = storage.write_bytes(
+        xlsx_relative_path,
+        _build_xlsx_bytes_from_rows(
+            rows=[
+                ["type", "user_agent", "directive", "value"],
+                *[
+                    [row_type, user_agent, directive, value]
+                    for row_type, user_agent, directive, value in execution_result.export_robots_rows
+                ],
+            ],
+            sheet_name="robots",
+        ),
+    )
+
+    _upsert_task_file(
+        session=session,
+        task_id=task.id,
+        file_name=f"{project_slug}.csv",
+        file_path=csv_file.relative_path,
+        file_type="text/csv",
+        file_size=csv_file.size,
+    )
+    _upsert_task_file(
+        session=session,
+        task_id=task.id,
+        file_name=f"{project_slug}.xlsx",
+        file_path=xlsx_file.relative_path,
+        file_type="xlsx",
+        file_size=xlsx_file.size,
+    )
+
+    result_payload = dict(execution_result.result_payload)
+    result_payload["export_file"] = xlsx_file.relative_path
+    result_payload["export_files"] = {
+        "csv": csv_file.relative_path,
+        "xlsx": xlsx_file.relative_path,
+    }
+    return _TaskExecutionResult(
+        result_payload=result_payload,
+        export_robots_rows=execution_result.export_robots_rows,
+    )
+
+
 def _persist_crawl_site_artifacts(
     *,
     session,
@@ -1495,6 +1574,50 @@ def _build_sitemap_rows_csv(rows: list[tuple[str, int | None]]) -> str:
     for url, status_code in rows:
         writer.writerow([url, "" if status_code is None else status_code])
     return buffer.getvalue()
+
+
+def _build_robots_rows_csv(rows: list[tuple[str, str, str, str]]) -> str:
+    """Build UTF-8 CSV content for robots.txt parsing output."""
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["type", "user_agent", "directive", "value"])
+    for row_type, user_agent, directive, value in rows:
+        writer.writerow([row_type, user_agent, directive, value])
+    return buffer.getvalue()
+
+
+def _build_robots_export_rows(parsed_robots: JsonPayload) -> list[tuple[str, str, str, str]]:
+    """Flatten parsed robots.txt payload into export rows."""
+
+    rows: list[tuple[str, str, str, str]] = []
+
+    sitemaps = parsed_robots.get("sitemaps")
+    if isinstance(sitemaps, list):
+        for sitemap_url in sitemaps:
+            if isinstance(sitemap_url, str) and sitemap_url:
+                rows.append(("sitemap", "", "sitemap", sitemap_url))
+
+    rules = parsed_robots.get("rules")
+    if isinstance(rules, list):
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            user_agent = rule.get("user_agent")
+            if not isinstance(user_agent, str):
+                user_agent = ""
+            allow_values = rule.get("allow")
+            if isinstance(allow_values, list):
+                for value in allow_values:
+                    if isinstance(value, str) and value:
+                        rows.append(("rule", user_agent, "allow", value))
+            disallow_values = rule.get("disallow")
+            if isinstance(disallow_values, list):
+                for value in disallow_values:
+                    if isinstance(value, str) and value:
+                        rows.append(("rule", user_agent, "disallow", value))
+
+    return rows
 
 
 async def _resolve_sitemap_status_rows(
