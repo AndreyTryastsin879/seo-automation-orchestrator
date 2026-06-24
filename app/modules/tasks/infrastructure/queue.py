@@ -17,10 +17,12 @@ TASK_QUEUE_NAMES = (
 )
 TASK_EXECUTION_JOB = "app.interfaces.worker.execute_task"
 DEFAULT_JOB_TIMEOUT_SECONDS = 300
+SITEMAP_JOB_TIMEOUT_SECONDS = 1800
 HEAVY_CRAWL_JOB_TIMEOUT_SECONDS = 86400
 JOB_TIMEOUT_BY_TASK_TYPE: dict[str, int] = {
     "crawl_site": 3600,
-    "fetch_sitemap": 600,
+    "fetch_sitemap": SITEMAP_JOB_TIMEOUT_SECONDS,
+    "fetch_robots": SITEMAP_JOB_TIMEOUT_SECONDS,
 }
 
 

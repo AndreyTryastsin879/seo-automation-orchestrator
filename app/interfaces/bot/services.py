@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -126,6 +126,17 @@ class AdHocCrawlLaunchResult:
     task: TaskDTO
     project_name: str
     start_url: str
+
+
+@dataclass(slots=True, frozen=True)
+class AdHocUrlListCrawlLaunchResult:
+    """Result of creating a fixed URL list crawl task from the bot."""
+
+    batch: TaskBatchDTO
+    task: TaskDTO
+    project_name: str
+    start_url: str
+    url_count: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -263,6 +274,60 @@ def launch_ad_hoc_crawl(
     finally:
         session.close()
 
+
+def launch_ad_hoc_url_list_crawl(
+    urls: list[str],
+    *,
+    project_name: str | None = None,
+    settings: CrawlLaunchSettings | None = None,
+) -> AdHocUrlListCrawlLaunchResult:
+    """Create a crawl task that processes only the provided URL list."""
+
+    if not urls:
+        raise ValueError("Список URL пуст.")
+
+    normalized_urls = _normalize_url_list(urls)
+    settings = settings or CrawlLaunchSettings()
+    effective_settings = replace(settings, max_pages=max(settings.max_pages, len(normalized_urls)))
+    webmaster_host = _normalize_webmaster_host(normalized_urls[0])
+    derived_project_name = project_name or _derive_project_name(webmaster_host)
+    session = SessionFactory()
+    try:
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.CRAWL_ADHOC,
+            title=f"Список URL: {derived_project_name}",
+            payload={
+                "start_url": normalized_urls[0],
+                "seed_urls": normalized_urls,
+                "follow_links": False,
+                "project_name": derived_project_name,
+                "crawl_settings": _settings_payload(effective_settings),
+            },
+        )
+        task = _create_crawl_task(
+            session=session,
+            batch_id=task_batch.id,
+            project_id=None,
+            start_url=normalized_urls[0],
+            project_name=derived_project_name,
+            settings=effective_settings,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            seed_urls=normalized_urls,
+            follow_links=False,
+        )
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="crawl_site")
+        return AdHocUrlListCrawlLaunchResult(
+            batch=task_batch,
+            task=task,
+            project_name=derived_project_name,
+            start_url=normalized_urls[0],
+            url_count=len(normalized_urls),
+        )
+    finally:
+        session.close()
+
 def launch_ad_hoc_sitemap(
     sitemap_url: str,
     *,
@@ -301,7 +366,11 @@ def launch_ad_hoc_sitemap(
         session.close()
 
 
-def launch_ad_hoc_robots(robots_url: str) -> AdHocRobotsLaunchResult:
+def launch_ad_hoc_robots(
+    robots_url: str,
+    *,
+    resolve_status_codes: bool = DEFAULT_SITEMAP_RESOLVE_STATUS_CODES,
+) -> AdHocRobotsLaunchResult:
     """Create an ad-hoc robots parsing task without writing a project record."""
 
     normalized_url = _ensure_absolute_url(robots_url)
@@ -311,13 +380,17 @@ def launch_ad_hoc_robots(robots_url: str) -> AdHocRobotsLaunchResult:
             session=session,
             batch_type=TaskBatchType.CRAWL_ADHOC,
             title=f"Парсинг robots.txt: {urlsplit(normalized_url).netloc.lower()}",
-            payload={"url": normalized_url},
+            payload={
+                "url": normalized_url,
+                "resolve_status_codes": resolve_status_codes,
+            },
         )
         task = _create_fetch_robots_task(
             session=session,
             batch_id=task_batch.id,
             project_id=None,
             robots_url=normalized_url,
+            resolve_status_codes=resolve_status_codes,
             queue_name=CRAWL_DEFAULT_QUEUE_NAME,
         )
         session.commit()
@@ -566,7 +639,11 @@ def launch_project_sitemap(
         session.close()
 
 
-def launch_project_robots(project_id: int) -> ProjectRobotsLaunchResult | None:
+def launch_project_robots(
+    project_id: int,
+    *,
+    resolve_status_codes: bool = DEFAULT_SITEMAP_RESOLVE_STATUS_CODES,
+) -> ProjectRobotsLaunchResult | None:
     """Create a robots parsing task for an existing project."""
 
     session = SessionFactory()
@@ -588,6 +665,7 @@ def launch_project_robots(project_id: int) -> ProjectRobotsLaunchResult | None:
                 "project_id": project.id,
                 "project_name": project.project_name,
                 "url": start_url,
+                "resolve_status_codes": resolve_status_codes,
             },
         )
         task = _create_fetch_robots_task(
@@ -595,6 +673,7 @@ def launch_project_robots(project_id: int) -> ProjectRobotsLaunchResult | None:
             batch_id=task_batch.id,
             project_id=project.id,
             robots_url=start_url,
+            resolve_status_codes=resolve_status_codes,
             queue_name=CRAWL_DEFAULT_QUEUE_NAME,
         )
         session.commit()
@@ -959,6 +1038,8 @@ def _create_crawl_task(
     settings: CrawlLaunchSettings,
     queue_name: str,
     project_name: str | None = None,
+    seed_urls: list[str] | None = None,
+    follow_links: bool = True,
 ) -> TaskDTO:
     """Create a crawl_site task through the application layer."""
 
@@ -978,6 +1059,10 @@ def _create_crawl_task(
     }
     if project_name:
         payload["project_name"] = project_name
+    if seed_urls:
+        payload["seed_urls"] = seed_urls
+    if not follow_links:
+        payload["follow_links"] = False
     return create_task.execute(
         CreateTaskCommand(
             batch_id=batch_id,
@@ -1022,6 +1107,7 @@ def _create_fetch_robots_task(
     batch_id: int | None,
     project_id: int | None,
     robots_url: str,
+    resolve_status_codes: bool,
     queue_name: str,
 ) -> TaskDTO:
     """Create a fetch_robots task through the application layer."""
@@ -1034,7 +1120,10 @@ def _create_fetch_robots_task(
             project_id=project_id,
             queue_name=queue_name,
             task_type="fetch_robots",
-            payload={"url": robots_url},
+            payload={
+                "url": robots_url,
+                "resolve_status_codes": resolve_status_codes,
+            },
         )
     )
 
@@ -1075,6 +1164,20 @@ def _settings_payload(settings: CrawlLaunchSettings) -> dict[str, object]:
         "max_5xx_before_stop": settings.max_5xx_before_stop,
         "retry_delay_ms": settings.retry_delay_ms,
     }
+
+
+def _normalize_url_list(urls: list[str]) -> list[str]:
+    """Normalize and deduplicate a user-provided URL list preserving order."""
+
+    normalized_urls: list[str] = []
+    seen: set[str] = set()
+    for raw_url in urls:
+        normalized = _ensure_absolute_url(raw_url)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_urls.append(normalized)
+    return normalized_urls
 
 
 def _queue_name_for_segment(crawl_segment: CrawlSegment) -> str:

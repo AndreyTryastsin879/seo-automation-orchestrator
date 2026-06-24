@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
+
 from aiogram import Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -36,12 +39,15 @@ from app.interfaces.bot.keyboards import (
     build_sitemap_project_selection_keyboard,
     build_sitemap_robots_actions_keyboard,
     build_sitemap_settings_keyboard,
+    build_url_list_profile_keyboard,
     build_robots_project_selection_keyboard,
     build_status_actions_keyboard,
+    build_url_list_collect_keyboard,
 )
 from app.interfaces.bot.services import (
     launch_ad_hoc_robots,
     launch_ad_hoc_sitemap,
+    launch_ad_hoc_url_list_crawl,
     launch_all_projects_sitemap,
     CrawlLaunchSettings,
     build_default_crawl_settings,
@@ -69,18 +75,26 @@ CRAWL_SETTINGS_STATE_KEY = "crawl_settings"
 HEAVY_CRAWL_SETTINGS_STATE_KEY = "heavy_crawl_settings"
 ADHOC_CRAWL_PROFILE_STATE_KEY = "adhoc_crawl_profile"
 SITEMAP_SETTINGS_STATE_KEY = "sitemap_settings"
+ADHOC_URL_LIST_BUFFER_STATE_KEY = "adhoc_url_list_buffer"
 HEAVY_CONCURRENCY_OPTIONS = (1, 2, 3, 4, 5)
 HEAVY_PAGE_OPTIONS = (5000, 25000, 100000, 150000, 200000, 250000)
 HEAVY_DELAY_OPTIONS = (250, 500, 1000, 2000, 5000)
 HEAVY_TIMEOUT_OPTIONS = (10, 15, 20, 30, 60)
 HEAVY_MAX_5XX_OPTIONS = (3, 5, 10, 20, 50)
 HEAVY_RETRY_DELAY_OPTIONS = (1000, 3000, 5000, 10000, 30000)
+_URL_LIST_BUFFER_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 
 
 class AdHocCrawlStates(StatesGroup):
     """FSM states for launching an ad-hoc crawl."""
 
     waiting_for_url = State()
+
+
+class AdHocUrlListStates(StatesGroup):
+    """FSM states for launching a fixed URL list crawl."""
+
+    waiting_for_urls = State()
 
 
 class AdHocSitemapStates(StatesGroup):
@@ -116,6 +130,18 @@ class ProjectWizardStates(StatesGroup):
     waiting_for_pagination_marker = State()
     waiting_for_card_sample = State()
     waiting_for_category_sample = State()
+
+
+def _get_url_list_buffer_lock(chat_id: int, user_id: int) -> asyncio.Lock:
+    """Return a per-chat/user lock for URL list buffer mutations."""
+
+    key = (chat_id, user_id)
+    existing = _URL_LIST_BUFFER_LOCKS.get(key)
+    if existing is not None:
+        return existing
+    lock = asyncio.Lock()
+    _URL_LIST_BUFFER_LOCKS[key] = lock
+    return lock
 
 
 PROJECT_WIZARD_STATE_KEY = "project_wizard"
@@ -273,6 +299,18 @@ async def handle_parsing_adhoc(callback: CallbackQuery, state: FSMContext) -> No
     await callback.message.answer(
         "Выбери, какие настройки применить к разовому запуску.",
         reply_markup=build_adhoc_profile_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "parsing:url_list")
+async def handle_parsing_url_list(callback: CallbackQuery, state: FSMContext) -> None:
+    """Ask which settings profile to use for a fixed URL list crawl."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        "Выбери, какие настройки применить к запуску по списку URL.",
+        reply_markup=build_url_list_profile_keyboard(),
     )
 
 
@@ -445,6 +483,124 @@ async def handle_parsing_adhoc_heavy(callback: CallbackQuery, state: FSMContext)
         "Будут применены heavy-настройки:\n"
         f"{_format_crawl_settings(settings)}\n\n"
         "Для отмены отправь /cancel."
+    )
+
+
+@router.callback_query(F.data == "parsing:url_list:cancel")
+async def handle_parsing_url_list_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    """Cancel fixed URL list profile selection."""
+
+    await callback.answer("Отменено")
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer("Запуск по списку URL отменён.")
+
+
+@router.callback_query(F.data == "parsing:url_list:default")
+async def handle_parsing_url_list_default(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start fixed URL list flow with default crawl settings."""
+
+    await callback.answer()
+    await state.set_state(AdHocUrlListStates.waiting_for_urls)
+    settings = await _get_crawl_settings(state)
+    await state.update_data(
+        {
+            ADHOC_CRAWL_PROFILE_STATE_KEY: "default",
+            ADHOC_URL_LIST_BUFFER_STATE_KEY: [],
+        }
+    )
+    await callback.message.answer(
+        "Отправь список URL, каждый с новой строки.\n\n"
+        "Если URL больше 200, лучше отправить `.txt` файл.\n"
+        "Внутри файла — один URL на строку.\n\n"
+        "Будут обработаны только переданные URL, без дальнейшего обхода ссылок.\n\n"
+        "Будут применены обычные настройки:\n"
+        f"{_format_crawl_settings(settings)}\n\n"
+        "Можно отправить список в несколько сообщений. Когда закончишь, нажми «Запустить список».\n\n"
+        "Для отмены отправь /cancel."
+    )
+
+
+@router.callback_query(F.data == "parsing:url_list:heavy")
+async def handle_parsing_url_list_heavy(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start fixed URL list flow with heavy crawl settings."""
+
+    await callback.answer()
+    await state.set_state(AdHocUrlListStates.waiting_for_urls)
+    settings = await _get_heavy_crawl_settings(state)
+    await state.update_data(
+        {
+            ADHOC_CRAWL_PROFILE_STATE_KEY: "heavy",
+            ADHOC_URL_LIST_BUFFER_STATE_KEY: [],
+        }
+    )
+    await callback.message.answer(
+        "Отправь список URL, каждый с новой строки.\n\n"
+        "Если URL больше 200, лучше отправить `.txt` файл.\n"
+        "Внутри файла — один URL на строку.\n\n"
+        "Будут обработаны только переданные URL, без дальнейшего обхода ссылок.\n\n"
+        "Будут применены heavy-настройки:\n"
+        f"{_format_crawl_settings(settings)}\n\n"
+        "Можно отправить список в несколько сообщений. Когда закончишь, нажми «Запустить список».\n\n"
+        "Для отмены отправь /cancel."
+    )
+
+
+@router.callback_query(F.data == "parsing:url_list:reset")
+async def handle_parsing_url_list_reset(callback: CallbackQuery, state: FSMContext) -> None:
+    """Clear the accumulated URL list while keeping the selected profile."""
+
+    await callback.answer("Список очищен")
+    lock = _get_url_list_buffer_lock(callback.message.chat.id, callback.from_user.id)
+    async with lock:
+        await state.update_data({ADHOC_URL_LIST_BUFFER_STATE_KEY: []})
+    await callback.message.answer(
+        "Список URL очищен. Отправь новые адреса, каждый с новой строки.",
+        reply_markup=build_url_list_collect_keyboard(url_count=0),
+    )
+
+
+@router.callback_query(F.data == "parsing:url_list:launch")
+async def handle_parsing_url_list_launch(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch a fixed URL list crawl from accumulated messages."""
+
+    await callback.answer()
+    lock = _get_url_list_buffer_lock(callback.message.chat.id, callback.from_user.id)
+    async with lock:
+        data = await state.get_data()
+        raw_urls = data.get(ADHOC_URL_LIST_BUFFER_STATE_KEY)
+        if not isinstance(raw_urls, list) or not raw_urls:
+            await callback.message.answer("Список URL пока пуст. Сначала пришли хотя бы один адрес.")
+            return
+
+        normalized_input_urls = [item for item in raw_urls if isinstance(item, str) and item.strip()]
+        if not normalized_input_urls:
+            await callback.message.answer("Список URL пока пуст. Сначала пришли хотя бы один адрес.")
+            return
+
+        try:
+            settings = await _get_adhoc_crawl_settings(state)
+            result = launch_ad_hoc_url_list_crawl(normalized_input_urls, settings=settings)
+        except ValueError as exc:
+            await callback.message.answer(str(exc))
+            return
+        except Exception:
+            await callback.message.answer(
+                "Не удалось запустить парсинг по списку URL. Попробуй ещё раз чуть позже."
+            )
+            return
+
+        await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        "Парсинг по списку URL запущен.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проект: {result.project_name}\n"
+        f"URL в списке: {result.url_count}\n"
+        f"Первый URL: {result.start_url}\n"
+        f"Task ID: {result.task.id}\n"
+        f"Тип задачи: {result.task.task_type}\n"
+        f"Статус: {result.task.status.value}\n\n"
+        "Проверить запуск можно через раздел Статус.",
+        reply_markup=build_main_menu_keyboard(),
     )
 
 
@@ -745,7 +901,11 @@ async def handle_robots_project_launch(callback: CallbackQuery, state: FSMContex
         return
 
     try:
-        result = launch_project_robots(project_id)
+        sitemap_settings = await _get_sitemap_settings(state)
+        result = launch_project_robots(
+            project_id,
+            resolve_status_codes=sitemap_settings["resolve_status_codes"],
+        )
     except ValueError as exc:
         await callback.message.answer(str(exc))
         return
@@ -1106,6 +1266,69 @@ async def handle_adhoc_url_input(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(AdHocUrlListStates.waiting_for_urls)
+async def handle_adhoc_url_list_input(message: Message, state: FSMContext) -> None:
+    """Accumulate a fixed URL list from one or more user messages."""
+
+    raw_text = (message.text or "").strip()
+    raw_urls: list[str]
+
+    if raw_text.startswith("/"):
+        await message.answer("Сначала заверши текущий сценарий через /cancel или пришли список URL.")
+        return
+
+    if raw_text:
+        raw_urls = [line.strip() for line in raw_text.splitlines() if line.strip()]
+    elif message.document is not None:
+        file_name = (message.document.file_name or "").lower()
+        mime_type = (message.document.mime_type or "").lower()
+        if not file_name.endswith(".txt") and mime_type not in {"text/plain", "application/octet-stream"}:
+            await message.answer("Поддерживается только `.txt` файл со списком URL, один URL на строку.")
+            return
+
+        file = await message.bot.get_file(message.document.file_id)
+        buffer = io.BytesIO()
+        await message.bot.download(file, destination=buffer)
+        file_bytes = buffer.getvalue()
+        decoded_text = None
+        for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+            try:
+                decoded_text = file_bytes.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if decoded_text is None:
+            await message.answer("Не удалось прочитать `.txt` файл. Сохрани его в UTF-8 или Windows-1251.")
+            return
+
+        raw_urls = [line.strip() for line in decoded_text.splitlines() if line.strip()]
+    else:
+        await message.answer("Не вижу список URL. Отправь адреса сообщением или `.txt` файлом.")
+        return
+
+    if not raw_urls:
+        await message.answer("Не удалось распознать URL. Отправь адреса сообщением или `.txt` файлом.")
+        return
+
+    user_id = message.from_user.id if message.from_user else 0
+    lock = _get_url_list_buffer_lock(message.chat.id, user_id)
+    async with lock:
+        data = await state.get_data()
+        buffered_urls = data.get(ADHOC_URL_LIST_BUFFER_STATE_KEY)
+        if not isinstance(buffered_urls, list):
+            buffered_urls = []
+        buffered_urls.extend(raw_urls)
+        await state.update_data({ADHOC_URL_LIST_BUFFER_STATE_KEY: buffered_urls})
+        total_count = len(buffered_urls)
+    await message.answer(
+        "Список URL обновлён.\n\n"
+        f"Добавлено в этом сообщении: {len(raw_urls)}\n"
+        f"Всего в буфере: {total_count}\n\n"
+        "Можешь прислать ещё одну порцию URL или нажать «Запустить список».",
+        reply_markup=build_url_list_collect_keyboard(url_count=total_count),
+    )
+
+
 @router.message(AdHocSitemapStates.waiting_for_url)
 async def handle_adhoc_sitemap_url_input(message: Message, state: FSMContext) -> None:
     """Create an ad-hoc sitemap parsing task from a user-provided URL."""
@@ -1161,7 +1384,11 @@ async def handle_adhoc_robots_url_input(message: Message, state: FSMContext) -> 
         return
 
     try:
-        result = launch_ad_hoc_robots(raw_text)
+        sitemap_settings = await _get_sitemap_settings(state)
+        result = launch_ad_hoc_robots(
+            raw_text,
+            resolve_status_codes=sitemap_settings["resolve_status_codes"],
+        )
     except ValueError as exc:
         await message.answer(str(exc))
         return

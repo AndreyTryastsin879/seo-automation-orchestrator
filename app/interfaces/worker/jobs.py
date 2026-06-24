@@ -6,6 +6,7 @@ import asyncio
 import csv
 import io
 import re
+import socket
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from app.modules.tasks.domain.enums import TaskStatus
 from app.modules.tasks.infrastructure import Task, TaskFile, TaskFileRepository, TaskRepository
 
 HTTP_TIMEOUT_SECONDS = 15
+SITEMAP_FETCH_TIMEOUT_SECONDS = 30
 SITEMAP_ENTRY_LIMIT = 100
 SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS = 10
 SITEMAP_STATUS_CHECK_MAX_CONCURRENCY = 10
@@ -54,7 +56,6 @@ class _TaskExecutionResult:
     result_payload: JsonPayload
     export_urls: list[str] | None = None
     export_sitemap_rows: list[tuple[str, int | None]] | None = None
-    export_robots_rows: list[tuple[str, str, str, str]] | None = None
     export_csv_content: str | None = None
 
 
@@ -301,14 +302,8 @@ def execute_task(task_id: int) -> None:
             raise _TaskCancellationRequestedError("Остановлено пользователем.")
 
         execution_result = _execute_by_type(task.id, task.task_type, task.payload)
-        if task.task_type == "fetch_sitemap":
+        if task.task_type in {"fetch_sitemap", "fetch_robots"}:
             execution_result = _persist_fetch_sitemap_artifacts(
-                session=session,
-                task=task,
-                execution_result=execution_result,
-            )
-        if task.task_type == "fetch_robots":
-            execution_result = _persist_fetch_robots_artifacts(
                 session=session,
                 task=task,
                 execution_result=execution_result,
@@ -339,14 +334,8 @@ def execute_task(task_id: int) -> None:
             partial_result_payload = None
             if isinstance(error, _TaskCancellationWithResultError):
                 execution_result = error.execution_result
-                if task is not None and task.task_type == "fetch_sitemap":
+                if task is not None and task.task_type in {"fetch_sitemap", "fetch_robots"}:
                     execution_result = _persist_fetch_sitemap_artifacts(
-                        session=session,
-                        task=task,
-                        execution_result=execution_result,
-                    )
-                if task is not None and task.task_type == "fetch_robots":
-                    execution_result = _persist_fetch_robots_artifacts(
                         session=session,
                         task=task,
                         execution_result=execution_result,
@@ -453,7 +442,11 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
         raise ValueError("fetch_sitemap payload must contain non-empty string field 'url'.")
     resolve_status_codes = bool(payload.get("resolve_status_codes", True))
 
-    fetched = _fetch_url(url.strip(), error_prefix="fetch_sitemap")
+    fetched = _fetch_url(
+        url.strip(),
+        error_prefix="fetch_sitemap",
+        timeout_seconds=SITEMAP_FETCH_TIMEOUT_SECONDS,
+    )
 
     if not _is_xml_response(fetched.content_type):
         result_payload: JsonPayload = {
@@ -525,12 +518,30 @@ def _execute_fetch_robots_task(payload: JsonPayload | None) -> _TaskExecutionRes
         raise ValueError("fetch_robots payload must contain non-empty string field 'url'.")
 
     normalized_url = _normalize_robots_url(url.strip())
-    fetched = _fetch_url(normalized_url, error_prefix="fetch_robots")
+    fetched = _fetch_url(
+        normalized_url,
+        error_prefix="fetch_robots",
+        timeout_seconds=SITEMAP_FETCH_TIMEOUT_SECONDS,
+    )
 
     encoding = _extract_charset(fetched.content_type) or "utf-8"
     body_text = fetched.body.decode(encoding, errors="replace")
     parsed_robots = _parse_robots_txt(body_text)
-    export_rows = _build_robots_export_rows(parsed_robots)
+    resolve_status_codes = bool(payload.get("resolve_status_codes", True))
+    sitemap_urls = [item for item in parsed_robots["sitemaps"] if isinstance(item, str) and item]
+    aggregated_urls, sitemap_diagnostics = _collect_urls_from_robots_sitemaps(sitemap_urls)
+    export_sitemap_rows = None
+    if aggregated_urls:
+        if resolve_status_codes:
+            export_sitemap_rows = asyncio.run(
+                _resolve_sitemap_status_rows(
+                    aggregated_urls,
+                    timeout_seconds=SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS,
+                    max_concurrency=SITEMAP_STATUS_CHECK_MAX_CONCURRENCY,
+                )
+            )
+        else:
+            export_sitemap_rows = [(item_url, None) for item_url in aggregated_urls]
 
     result_payload: JsonPayload = {
         "url": url.strip(),
@@ -543,6 +554,10 @@ def _execute_fetch_robots_task(payload: JsonPayload | None) -> _TaskExecutionRes
         "rules": parsed_robots["rules"],
         "sitemap_directive_count": len(parsed_robots["sitemaps"]),
         "rule_group_count": len(parsed_robots["rules"]),
+        "url_count": len(aggregated_urls),
+        "urls": aggregated_urls[:SITEMAP_ENTRY_LIMIT],
+        "resolved_status_count": len(aggregated_urls) if resolve_status_codes and aggregated_urls else 0,
+        "resolve_status_codes": resolve_status_codes,
     }
 
     if fetched.status_code == 404:
@@ -561,10 +576,13 @@ def _execute_fetch_robots_task(payload: JsonPayload | None) -> _TaskExecutionRes
             result_payload,
             "В robots.txt не найдено ни одного правила или sitemap-директивы.",
         )
+    for diagnostic in sitemap_diagnostics:
+        result_payload = _with_diagnostic(result_payload, diagnostic)
 
     return _TaskExecutionResult(
         result_payload=result_payload,
-        export_robots_rows=export_rows,
+        export_urls=aggregated_urls or None,
+        export_sitemap_rows=export_sitemap_rows,
     )
 
 
@@ -577,6 +595,17 @@ def _execute_crawl_site_task(task_id: int, payload: JsonPayload | None) -> _Task
     start_url = payload.get("start_url")
     if not isinstance(start_url, str) or not start_url.strip():
         raise ValueError("crawl_site payload must contain non-empty string field 'start_url'.")
+    follow_links = _get_bool(payload, "follow_links", default=True)
+    raw_seed_urls = payload.get("seed_urls")
+    seed_urls: list[str] | None = None
+    if raw_seed_urls is not None:
+        if not isinstance(raw_seed_urls, list) or not raw_seed_urls:
+            raise ValueError("crawl_site payload field 'seed_urls' must be a non-empty list of URLs.")
+        seed_urls = []
+        for item in raw_seed_urls:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("crawl_site payload field 'seed_urls' must contain non-empty string URLs.")
+            seed_urls.append(_normalize_crawl_url(item.strip()))
 
     max_pages = _get_positive_int(payload, "max_pages")
     max_depth = _get_non_negative_int(payload, "max_depth")
@@ -594,6 +623,8 @@ def _execute_crawl_site_task(task_id: int, payload: JsonPayload | None) -> _Task
             _run_crawler(
                 task_id=task_id,
                 start_url=normalized_start_url,
+                seed_urls=seed_urls,
+                follow_links=follow_links,
                 max_pages=max_pages,
                 max_depth=max_depth,
                 max_concurrency=max_concurrency,
@@ -687,6 +718,10 @@ def _fetch_url(url: str, *, error_prefix: str, timeout_seconds: int = HTTP_TIMEO
                 body=error.read(),
                 redirect_status_code=redirect_status_code,
             )
+        except socket.timeout as error:
+            raise ValueError(f"{error_prefix} request failed: read operation timed out") from error
+        except TimeoutError as error:
+            raise ValueError(f"{error_prefix} request failed: read operation timed out") from error
         except URLError as error:
             raise ValueError(f"{error_prefix} request failed: {error.reason}") from error
 
@@ -854,6 +889,8 @@ async def _run_crawler(
     *,
     task_id: int,
     start_url: str,
+    seed_urls: list[str] | None,
+    follow_links: bool,
     max_pages: int,
     max_depth: int,
     max_concurrency: int,
@@ -867,13 +904,14 @@ async def _run_crawler(
     """Run the async crawl pipeline and collect page rows."""
 
     queue: asyncio.Queue[_CrawlQueueItem | None] = asyncio.Queue()
-    visited: set[str] = {start_url}
+    initial_urls = seed_urls or [start_url]
+    visited: set[str] = set(initial_urls)
     rows: list[_CrawlRow] = []
     diagnostics: list[str] = []
     lock = asyncio.Lock()
 
     pages_crawled = 0
-    pages_discovered = 1
+    pages_discovered = len(initial_urls)
     query_links_seen = 0
     robots_filtered_links = 0
     total_5xx_responses = 0
@@ -892,7 +930,8 @@ async def _run_crawler(
         robots_policy = _RobotsPolicy(allow=(), disallow=())
         diagnostics.append("Фильтрация по robots.txt отключена настройками запуска.")
 
-    await queue.put(_CrawlQueueItem(url=start_url, source_url=None, depth=0))
+    for initial_url in initial_urls:
+        await queue.put(_CrawlQueueItem(url=initial_url, source_url=None, depth=0))
 
     def build_partial_crawl_result(*, extra_diagnostic: str | None = None) -> _CrawlRunResult:
         """Build a partial crawl result from current in-memory progress."""
@@ -997,7 +1036,7 @@ async def _run_crawler(
                         if total_5xx_responses >= max_5xx_before_stop:
                             stop_due_to_5xx = True
 
-                    if not stop_due_to_5xx:
+                    if follow_links and not stop_due_to_5xx:
                         for discovered_item in page_result.discovered_urls:
                             if discovered_item.depth > max_depth:
                                 continue
@@ -1232,7 +1271,11 @@ def _collect_sitemap_urls(url: str, *, visited: set[str]) -> JsonPayload:
         }
 
     visited.add(url)
-    fetched = _fetch_url(url, error_prefix="fetch_sitemap")
+    fetched = _fetch_url(
+        url,
+        error_prefix="fetch_sitemap",
+        timeout_seconds=SITEMAP_FETCH_TIMEOUT_SECONDS,
+    )
     if not _is_xml_response(fetched.content_type):
         raise ValueError("fetch_sitemap response does not look like XML sitemap.")
 
@@ -1398,66 +1441,6 @@ def _persist_fetch_sitemap_artifacts(
     )
 
 
-def _persist_fetch_robots_artifacts(
-    *,
-    session,
-    task: Task,
-    execution_result: _TaskExecutionResult,
-) -> _TaskExecutionResult:
-    """Persist robots.txt CSV/XLSX export and TaskFile metadata."""
-
-    if execution_result.export_robots_rows is None:
-        return execution_result
-
-    project_slug = _resolve_task_slug(task)
-    csv_relative_path = f"robots_parsing/{project_slug}.csv"
-    xlsx_relative_path = f"robots_parsing/{project_slug}.xlsx"
-    storage = LocalFileStorage()
-    csv_content = _build_robots_rows_csv(execution_result.export_robots_rows)
-    csv_file = storage.write_text(csv_relative_path, csv_content, encoding="utf-8")
-    xlsx_file = storage.write_bytes(
-        xlsx_relative_path,
-        _build_xlsx_bytes_from_rows(
-            rows=[
-                ["type", "user_agent", "directive", "value"],
-                *[
-                    [row_type, user_agent, directive, value]
-                    for row_type, user_agent, directive, value in execution_result.export_robots_rows
-                ],
-            ],
-            sheet_name="robots",
-        ),
-    )
-
-    _upsert_task_file(
-        session=session,
-        task_id=task.id,
-        file_name=f"{project_slug}.csv",
-        file_path=csv_file.relative_path,
-        file_type="text/csv",
-        file_size=csv_file.size,
-    )
-    _upsert_task_file(
-        session=session,
-        task_id=task.id,
-        file_name=f"{project_slug}.xlsx",
-        file_path=xlsx_file.relative_path,
-        file_type="xlsx",
-        file_size=xlsx_file.size,
-    )
-
-    result_payload = dict(execution_result.result_payload)
-    result_payload["export_file"] = xlsx_file.relative_path
-    result_payload["export_files"] = {
-        "csv": csv_file.relative_path,
-        "xlsx": xlsx_file.relative_path,
-    }
-    return _TaskExecutionResult(
-        result_payload=result_payload,
-        export_robots_rows=execution_result.export_robots_rows,
-    )
-
-
 def _persist_crawl_site_artifacts(
     *,
     session,
@@ -1576,50 +1559,6 @@ def _build_sitemap_rows_csv(rows: list[tuple[str, int | None]]) -> str:
     return buffer.getvalue()
 
 
-def _build_robots_rows_csv(rows: list[tuple[str, str, str, str]]) -> str:
-    """Build UTF-8 CSV content for robots.txt parsing output."""
-
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["type", "user_agent", "directive", "value"])
-    for row_type, user_agent, directive, value in rows:
-        writer.writerow([row_type, user_agent, directive, value])
-    return buffer.getvalue()
-
-
-def _build_robots_export_rows(parsed_robots: JsonPayload) -> list[tuple[str, str, str, str]]:
-    """Flatten parsed robots.txt payload into export rows."""
-
-    rows: list[tuple[str, str, str, str]] = []
-
-    sitemaps = parsed_robots.get("sitemaps")
-    if isinstance(sitemaps, list):
-        for sitemap_url in sitemaps:
-            if isinstance(sitemap_url, str) and sitemap_url:
-                rows.append(("sitemap", "", "sitemap", sitemap_url))
-
-    rules = parsed_robots.get("rules")
-    if isinstance(rules, list):
-        for rule in rules:
-            if not isinstance(rule, dict):
-                continue
-            user_agent = rule.get("user_agent")
-            if not isinstance(user_agent, str):
-                user_agent = ""
-            allow_values = rule.get("allow")
-            if isinstance(allow_values, list):
-                for value in allow_values:
-                    if isinstance(value, str) and value:
-                        rows.append(("rule", user_agent, "allow", value))
-            disallow_values = rule.get("disallow")
-            if isinstance(disallow_values, list):
-                for value in disallow_values:
-                    if isinstance(value, str) and value:
-                        rows.append(("rule", user_agent, "disallow", value))
-
-    return rows
-
-
 async def _resolve_sitemap_status_rows(
     urls: list[str],
     *,
@@ -1640,6 +1579,33 @@ async def _resolve_sitemap_status_rows(
             return (url, status_code)
 
     return await asyncio.gather(*(resolve_one(url) for url in urls))
+
+
+def _collect_urls_from_robots_sitemaps(sitemap_urls: list[str]) -> tuple[list[str], list[str]]:
+    """Collect and deduplicate URLs from sitemap locations declared in robots.txt."""
+
+    visited_sitemaps: set[str] = set()
+    seen_urls: set[str] = set()
+    aggregated_urls: list[str] = []
+    diagnostics: list[str] = []
+
+    for sitemap_url in sitemap_urls:
+        try:
+            nested_result = _collect_sitemap_urls(sitemap_url, visited=visited_sitemaps)
+        except (ValueError, TimeoutError, socket.timeout) as error:
+            diagnostics.append(f"Не удалось обработать sitemap {sitemap_url}: {error}")
+            continue
+        except Exception as error:
+            diagnostics.append(f"Не удалось обработать sitemap {sitemap_url}: {error}")
+            continue
+
+        for item_url in nested_result["urls"]:
+            if item_url in seen_urls:
+                continue
+            seen_urls.add(item_url)
+            aggregated_urls.append(item_url)
+
+    return aggregated_urls, diagnostics
 
 
 def _fetch_status_code_only(url: str, timeout_seconds: int) -> int | None:
@@ -1685,7 +1651,7 @@ def _fetch_status_code_via_method(
                 current_url = urljoin(current_url, location)
                 continue
             return error.code
-        except URLError:
+        except (URLError, TimeoutError, socket.timeout):
             return None
 
     return None

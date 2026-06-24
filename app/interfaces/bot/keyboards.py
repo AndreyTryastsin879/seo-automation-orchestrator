@@ -30,6 +30,7 @@ def build_parsing_actions_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Список обычных проектов", callback_data="parsing:projects")
     builder.button(text="Список тяжелых проектов", callback_data="parsing:heavy_projects")
     builder.button(text="Парсить свой URL", callback_data="parsing:adhoc")
+    builder.button(text="Список URL", callback_data="parsing:url_list")
     builder.button(text="Настройки обычных", callback_data="parsing:settings")
     builder.button(text="Настройки тяжелых", callback_data="parsing:heavy_settings")
     builder.button(text="Последние запуски", callback_data="parsing:recent")
@@ -45,6 +46,28 @@ def build_adhoc_profile_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Обычные настройки", callback_data="parsing:adhoc:default")
     builder.button(text="Heavy-настройки", callback_data="parsing:adhoc:heavy")
     builder.button(text="Отмена", callback_data="parsing:adhoc:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_url_list_profile_keyboard() -> InlineKeyboardMarkup:
+    """Build a profile picker for fixed URL list crawl launches."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Обычные настройки", callback_data="parsing:url_list:default")
+    builder.button(text="Heavy-настройки", callback_data="parsing:url_list:heavy")
+    builder.button(text="Отмена", callback_data="parsing:url_list:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_url_list_collect_keyboard(*, url_count: int) -> InlineKeyboardMarkup:
+    """Build actions for accumulating a multi-message URL list."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Запустить список ({url_count})", callback_data="parsing:url_list:launch")
+    builder.button(text="Очистить список", callback_data="parsing:url_list:reset")
+    builder.button(text="Отмена", callback_data="parsing:url_list:cancel")
     builder.adjust(1)
     return builder.as_markup()
 
