@@ -12,7 +12,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from app.modules.projects.domain import CrawlSegment
+from app.interfaces.bot.access import is_root_admin_user
 from app.interfaces.bot.keyboards import (
+    build_access_actions_keyboard,
+    build_access_users_keyboard,
     build_adhoc_profile_keyboard,
     build_batch_actions_keyboard,
     build_confirm_all_projects_keyboard,
@@ -45,6 +48,7 @@ from app.interfaces.bot.keyboards import (
     build_url_list_collect_keyboard,
 )
 from app.interfaces.bot.services import (
+    add_allowed_bot_user,
     launch_ad_hoc_robots,
     launch_ad_hoc_sitemap,
     launch_ad_hoc_url_list_crawl,
@@ -56,6 +60,8 @@ from app.interfaces.bot.services import (
     cancel_active_crawl_tasks,
     create_project,
     delete_project,
+    list_allowed_bot_users,
+    list_root_admin_phone_numbers,
     get_project,
     get_batch_status,
     get_task_status,
@@ -67,6 +73,7 @@ from app.interfaces.bot.services import (
     list_all_projects,
     list_recent_batches,
     list_projects,
+    remove_allowed_bot_user,
     update_project,
 )
 
@@ -107,6 +114,12 @@ class AdHocRobotsStates(StatesGroup):
     """FSM states for launching an ad-hoc robots parsing task."""
 
     waiting_for_url = State()
+
+
+class AccessUserStates(StatesGroup):
+    """FSM states for bot access management."""
+
+    waiting_for_phone = State()
 
 
 class TaskStatusStates(StatesGroup):
@@ -234,6 +247,22 @@ async def handle_projects_menu(message: Message) -> None:
     )
 
 
+@router.message(F.text == "Доступ")
+async def handle_access_menu(message: Message, state: FSMContext) -> None:
+    """Open bot access management section for root admins."""
+
+    user = message.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await message.answer("Раздел доступа доступен только root-админу.")
+        return
+
+    await _clear_flow_state_preserving_settings(state)
+    await message.answer(
+        "Раздел доступа.\nВыбери действие ниже.",
+        reply_markup=build_access_actions_keyboard(),
+    )
+
+
 @router.message(F.text == "Парсинг sitemap")
 async def handle_sitemap_menu(message: Message) -> None:
     """Open sitemap parsing section."""
@@ -270,6 +299,83 @@ async def handle_parsing_projects(callback: CallbackQuery, state: FSMContext) ->
         f"{_format_default_project_settings(settings)}",
         reply_markup=build_project_selection_keyboard(projects),
     )
+
+
+@router.callback_query(F.data == "access:list")
+async def handle_access_list(callback: CallbackQuery) -> None:
+    """Show root admins and DB-managed allowed users."""
+
+    await callback.answer()
+    user = callback.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await callback.message.answer("Раздел доступа доступен только root-админу.")
+        return
+
+    root_numbers = list_root_admin_phone_numbers()
+    db_users = list_allowed_bot_users()
+    lines = ["Root-админы:"]
+    if root_numbers:
+        lines.extend(f"- {phone}" for phone in root_numbers)
+    else:
+        lines.append("- —")
+
+    lines.append("")
+    lines.append("Пользователи из БД:")
+    if db_users:
+        for access_user in db_users:
+            title = access_user.phone_number
+            if access_user.username:
+                title += f" (@{access_user.username})"
+            lines.append(f"- {title}")
+    else:
+        lines.append("- —")
+
+    await callback.message.answer(
+        "\n".join(lines),
+        reply_markup=build_access_users_keyboard(db_users) if db_users else None,
+    )
+
+
+@router.callback_query(F.data == "access:add")
+async def handle_access_add(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start the allowlist add flow for root admins."""
+
+    await callback.answer()
+    user = callback.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await callback.message.answer("Раздел доступа доступен только root-админу.")
+        return
+
+    await state.set_state(AccessUserStates.waiting_for_phone)
+    await callback.message.answer(
+        "Пришли номер телефона пользователя.\n\n"
+        "Можно отправить номер текстом или контактом.\n"
+        "Пример: 79213793537",
+    )
+
+
+@router.callback_query(F.data.startswith("access:delete:"))
+async def handle_access_delete(callback: CallbackQuery) -> None:
+    """Delete one DB-managed allowed user."""
+
+    await callback.answer()
+    user = callback.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await callback.message.answer("Раздел доступа доступен только root-админу.")
+        return
+
+    raw_id = callback.data.rsplit(":", 1)[-1]
+    try:
+        access_user_id = int(raw_id)
+    except ValueError:
+        await callback.message.answer("Не удалось определить пользователя.")
+        return
+
+    deleted = remove_allowed_bot_user(access_user_id)
+    if deleted:
+        await callback.message.answer("Пользователь удалён из доступа.")
+    else:
+        await callback.message.answer("Пользователь уже отсутствует.")
 
 
 @router.callback_query(F.data == "parsing:heavy_projects")
@@ -1337,6 +1443,48 @@ async def handle_adhoc_sitemap_url_input(message: Message, state: FSMContext) ->
     if not raw_text:
         await message.answer("Не вижу URL. Отправь адрес sitemap, например https://example.com/sitemap.xml")
         return
+
+
+@router.message(AccessUserStates.waiting_for_phone)
+async def handle_access_user_phone_input(message: Message, state: FSMContext) -> None:
+    """Add a bot allowlist user by phone number."""
+
+    user = message.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await _clear_flow_state_preserving_settings(state)
+        await message.answer("Раздел доступа доступен только root-админу.")
+        return
+
+    phone_number: str | None = None
+    if message.contact is not None:
+        phone_number = message.contact.phone_number
+    else:
+        raw_text = (message.text or "").strip()
+        if raw_text.startswith("/"):
+            await message.answer("Сначала заверши текущий сценарий через /cancel или пришли номер телефона.")
+            return
+        if raw_text:
+            phone_number = raw_text
+
+    if not phone_number:
+        await message.answer("Не вижу номер телефона. Пришли его текстом или контактом.")
+        return
+
+    try:
+        access_user = add_allowed_bot_user(phone_number)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    except Exception:
+        await message.answer("Не удалось добавить пользователя. Попробуй ещё раз чуть позже.")
+        return
+
+    await _clear_flow_state_preserving_settings(state)
+    await message.answer(
+        "Пользователь добавлен в доступ.\n\n"
+        f"Номер: {access_user.phone_number}",
+        reply_markup=build_main_menu_keyboard(),
+    )
 
     if raw_text.startswith("/"):
         await message.answer("Сначала заверши текущий сценарий через /cancel или пришли URL sitemap.")

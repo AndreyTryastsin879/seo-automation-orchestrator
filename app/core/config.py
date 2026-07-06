@@ -21,6 +21,7 @@ class Settings:
     bot_proxy: str | None
     bot_webhook_url: str | None
     bot_webhook_secret: str | None
+    bot_allowed_phone_numbers: tuple[str, ...]
 
 
 def _as_bool(value: str, *, default: bool = False) -> bool:
@@ -32,6 +33,19 @@ def _as_bool(value: str, *, default: bool = False) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _as_phone_tuple(value: str | None) -> tuple[str, ...]:
+    """Parse a comma/newline-separated phone whitelist."""
+
+    if not value:
+        return ()
+    normalized_items: list[str] = []
+    for chunk in value.replace("\n", ",").split(","):
+        item = chunk.strip()
+        if item:
+            normalized_items.append(item)
+    return tuple(normalized_items)
 
 
 @lru_cache(maxsize=1)
@@ -52,4 +66,5 @@ def get_settings() -> Settings:
         bot_proxy=os.getenv("BOT_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"),
         bot_webhook_url=os.getenv("BOT_WEBHOOK_URL"),
         bot_webhook_secret=os.getenv("BOT_WEBHOOK_SECRET"),
+        bot_allowed_phone_numbers=_as_phone_tuple(os.getenv("BOT_ALLOWED_PHONE_NUMBERS")),
     )

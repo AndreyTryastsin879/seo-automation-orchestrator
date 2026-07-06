@@ -14,6 +14,14 @@ from app.core.config import get_settings
 from app.core.db import SessionFactory
 from app.core.redis import get_redis_connection
 from app.core.storage import LocalFileStorage
+from app.modules.bot_access.application import (
+    BotAccessUserDTO,
+    CreateBotAccessUserUseCase,
+    DeleteBotAccessUserUseCase,
+    ListBotAccessUsersUseCase,
+    normalize_phone_number,
+)
+from app.modules.bot_access.infrastructure import BotAccessUserRepository
 from app.modules.projects.application import (
     CreateProjectCommand,
     CreateProjectUseCase,
@@ -228,6 +236,55 @@ class CancelTaskBatchResult:
     batch_id: int
     pending_cancelled: int
     running_cancel_requested: int
+
+
+def list_root_admin_phone_numbers() -> tuple[str, ...]:
+    """Return normalized root admin phone numbers from env."""
+
+    return tuple(
+        normalized
+        for normalized in (
+            normalize_phone_number(value) for value in get_settings().bot_allowed_phone_numbers
+        )
+        if normalized
+    )
+
+
+def list_allowed_bot_users() -> list[BotAccessUserDTO]:
+    """Return allowed non-root bot users managed in the database."""
+
+    session = SessionFactory()
+    try:
+        repository = BotAccessUserRepository(session)
+        return ListBotAccessUsersUseCase(repository).execute()
+    finally:
+        session.close()
+
+
+def add_allowed_bot_user(phone_number: str) -> BotAccessUserDTO:
+    """Allow a phone number to access the bot."""
+
+    session = SessionFactory()
+    try:
+        repository = BotAccessUserRepository(session)
+        result = CreateBotAccessUserUseCase(repository).execute(phone_number)
+        session.commit()
+        return result
+    finally:
+        session.close()
+
+
+def remove_allowed_bot_user(access_user_id: int) -> bool:
+    """Remove a non-root phone number from the bot allowlist."""
+
+    session = SessionFactory()
+    try:
+        repository = BotAccessUserRepository(session)
+        deleted = DeleteBotAccessUserUseCase(repository).execute(access_user_id)
+        session.commit()
+        return deleted
+    finally:
+        session.close()
 
 
 def launch_ad_hoc_crawl(

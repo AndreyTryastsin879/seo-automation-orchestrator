@@ -7,6 +7,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.redis import RedisStorage
 
 from app.core.config import get_settings
+from app.interfaces.bot.access import BotAccessMiddleware
 from app.interfaces.bot.handlers import register_handlers
 
 
@@ -27,5 +28,8 @@ def create_dispatcher() -> Dispatcher:
 
     settings = get_settings()
     dispatcher = Dispatcher(storage=RedisStorage.from_url(settings.redis_url))
+    access_middleware = BotAccessMiddleware()
+    dispatcher.message.outer_middleware(access_middleware)
+    dispatcher.callback_query.outer_middleware(access_middleware)
     register_handlers(dispatcher)
     return dispatcher

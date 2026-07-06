@@ -7,6 +7,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.interfaces.bot.services import RecentBatchSummary, RecentTaskSummary
 from app.interfaces.bot.services import CrawlLaunchSettings
+from app.modules.bot_access.application import BotAccessUserDTO
 from app.modules.projects.application import ProjectDTO
 
 
@@ -17,9 +18,23 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="Парсинг"), KeyboardButton(text="Парсинг sitemap")],
             [KeyboardButton(text="Проекты"), KeyboardButton(text="Статус")],
+            [KeyboardButton(text="Доступ")],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выбери раздел",
+    )
+
+
+def build_phone_access_keyboard() -> ReplyKeyboardMarkup:
+    """Build a one-button keyboard for sharing the user's phone number."""
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Поделиться номером телефона", request_contact=True)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Нажми кнопку ниже, чтобы подтвердить доступ",
     )
 
 
@@ -115,6 +130,29 @@ def build_projects_actions_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Добавить", callback_data="projects:add")
     builder.button(text="Редактировать", callback_data="projects:edit")
     builder.button(text="Удалить", callback_data="projects:delete")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_access_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build actions for bot access management."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Список пользователей", callback_data="access:list")
+    builder.button(text="Добавить пользователя", callback_data="access:add")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_access_users_keyboard(users: list[BotAccessUserDTO]) -> InlineKeyboardMarkup:
+    """Build a removable user list keyboard for non-root bot users."""
+
+    builder = InlineKeyboardBuilder()
+    for user in users:
+        builder.button(
+            text=f"Удалить {user.phone_number}",
+            callback_data=f"access:delete:{user.id}",
+        )
     builder.adjust(1)
     return builder.as_markup()
 
