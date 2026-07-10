@@ -57,6 +57,7 @@ class _TaskExecutionResult:
     export_urls: list[str] | None = None
     export_sitemap_rows: list[tuple[str, int | None]] | None = None
     export_csv_content: str | None = None
+    suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow] | None = None
 
 
 class _TaskCancellationRequestedError(RuntimeError):
@@ -100,6 +101,15 @@ class _CrawlRow:
 
 
 @dataclass(slots=True, frozen=True)
+class _SuspiciousRelativeLinkRow:
+    """One bare relative link excluded from the crawl graph."""
+
+    url: str
+    source_url: str
+    href: str
+
+
+@dataclass(slots=True, frozen=True)
 class _ExtractedPageData:
     """Parsed SEO fields and links from an HTML page."""
 
@@ -116,6 +126,7 @@ class _CrawlPageResult:
 
     row: _CrawlRow
     discovered_urls: list[_CrawlQueueItem]
+    suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow]
     query_links_seen: int = 0
     robots_filtered_links: int = 0
     is_5xx: bool = False
@@ -126,6 +137,7 @@ class _CrawlRunResult:
     """Aggregate result of a crawl task."""
 
     rows: list[_CrawlRow]
+    suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow]
     pages_crawled: int
     pages_discovered: int
     query_links_seen: int
@@ -652,6 +664,7 @@ def _execute_crawl_site_task(task_id: int, payload: JsonPayload | None) -> _Task
             retry_delay_ms=retry_delay_ms,
             crawl_result=_CrawlRunResult(
                 rows=[],
+                suspicious_relative_link_rows=[],
                 pages_crawled=0,
                 pages_discovered=1,
                 query_links_seen=0,
@@ -750,6 +763,7 @@ def _build_crawl_task_execution_result(
         "pages_discovered": crawl_result.pages_discovered,
         "query_links_seen": crawl_result.query_links_seen,
         "robots_filtered_links": crawl_result.robots_filtered_links,
+        "suspicious_relative_links_count": len(crawl_result.suspicious_relative_link_rows),
         "max_depth": max_depth,
         "max_pages": max_pages,
         "max_concurrency": max_concurrency,
@@ -774,6 +788,7 @@ def _build_crawl_task_execution_result(
     return _TaskExecutionResult(
         result_payload=result_payload,
         export_csv_content=csv_content,
+        suspicious_relative_link_rows=crawl_result.suspicious_relative_link_rows,
     )
 
 
@@ -800,6 +815,7 @@ def _build_crawl_progress_payload(
         "pages_discovered": crawl_result.pages_discovered,
         "query_links_seen": crawl_result.query_links_seen,
         "robots_filtered_links": crawl_result.robots_filtered_links,
+        "suspicious_relative_links_count": len(crawl_result.suspicious_relative_link_rows),
         "max_depth": max_depth,
         "max_pages": max_pages,
         "max_concurrency": max_concurrency,
@@ -907,6 +923,7 @@ async def _run_crawler(
     initial_urls = seed_urls or [start_url]
     visited: set[str] = set(initial_urls)
     rows: list[_CrawlRow] = []
+    suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow] = []
     diagnostics: list[str] = []
     lock = asyncio.Lock()
 
@@ -951,6 +968,7 @@ async def _run_crawler(
         partial_rows = sorted(rows, key=lambda row: (row.depth, row.url))
         return _CrawlRunResult(
             rows=partial_rows,
+            suspicious_relative_link_rows=list(suspicious_relative_link_rows),
             pages_crawled=pages_crawled,
             pages_discovered=pages_discovered,
             query_links_seen=query_links_seen,
@@ -976,6 +994,7 @@ async def _run_crawler(
         partial_rows = sorted(rows, key=lambda row: (row.depth, row.url))
         return _CrawlRunResult(
             rows=partial_rows,
+            suspicious_relative_link_rows=list(suspicious_relative_link_rows),
             pages_crawled=pages_crawled,
             pages_discovered=pages_discovered,
             query_links_seen=query_links_seen,
@@ -1031,6 +1050,7 @@ async def _run_crawler(
                     status_summary_counter[status_key] += 1
                     query_links_seen += page_result.query_links_seen
                     robots_filtered_links += page_result.robots_filtered_links
+                    suspicious_relative_link_rows.extend(page_result.suspicious_relative_link_rows)
                     if page_result.is_5xx:
                         total_5xx_responses += 1
                         if total_5xx_responses >= max_5xx_before_stop:
@@ -1143,6 +1163,7 @@ async def _crawl_page(
                 fetch_error=str(error),
             ),
             discovered_urls=[],
+            suspicious_relative_link_rows=[],
             is_5xx=False,
         )
 
@@ -1153,6 +1174,8 @@ async def _crawl_page(
     )
 
     discovered_urls: list[_CrawlQueueItem] = []
+    suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow] = []
+    suspicious_urls_seen: set[str] = set()
     query_links_seen = 0
     robots_filtered_links = 0
     if fetched.status_code == 200 and item.depth >= 0:
@@ -1169,6 +1192,17 @@ async def _crawl_page(
             if filter_reason == "robots_disallow":
                 robots_filtered_links += 1
             if normalized_url is None:
+                continue
+            if _is_bare_relative_path(href):
+                if normalized_url not in suspicious_urls_seen:
+                    suspicious_urls_seen.add(normalized_url)
+                    suspicious_relative_link_rows.append(
+                        _SuspiciousRelativeLinkRow(
+                            url=normalized_url,
+                            source_url=fetched.final_url,
+                            href=href.strip(),
+                        )
+                    )
                 continue
             discovered_urls.append(
                 _CrawlQueueItem(
@@ -1194,6 +1228,7 @@ async def _crawl_page(
     return _CrawlPageResult(
         row=row,
         discovered_urls=discovered_urls,
+        suspicious_relative_link_rows=suspicious_relative_link_rows,
         query_links_seen=query_links_seen,
         robots_filtered_links=robots_filtered_links,
         is_5xx=500 <= fetched.status_code <= 599,
@@ -1459,7 +1494,10 @@ def _persist_crawl_site_artifacts(
     csv_file = storage.write_text(csv_relative_path, execution_result.export_csv_content, encoding="utf-8")
     xlsx_file = storage.write_bytes(
         xlsx_relative_path,
-        _build_crawl_rows_xlsx(_parse_crawl_rows_from_csv(execution_result.export_csv_content)),
+        _build_crawl_rows_xlsx(
+            _parse_crawl_rows_from_csv(execution_result.export_csv_content),
+            suspicious_relative_link_rows=execution_result.suspicious_relative_link_rows or [],
+        ),
     )
 
     task_file_repository = TaskFileRepository(session)
@@ -1731,10 +1769,28 @@ def _parse_crawl_rows_from_csv(csv_content: str) -> list[list[str]]:
     return [list(row) for row in reader]
 
 
-def _build_crawl_rows_xlsx(rows: list[list[str]]) -> bytes:
-    """Build XLSX bytes for crawl rows."""
+def _build_crawl_rows_xlsx(
+    rows: list[list[str]],
+    *,
+    suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow],
+) -> bytes:
+    """Build crawl XLSX with the regular crawl and excluded-link diagnostics."""
 
-    return _build_xlsx_bytes_from_rows(rows=rows, sheet_name="crawl_pages")
+    from openpyxl import Workbook
+
+    workbook = Workbook(write_only=True)
+    crawl_worksheet = workbook.create_sheet(title="crawl_pages")
+    for row in rows:
+        crawl_worksheet.append(row)
+
+    diagnostics_worksheet = workbook.create_sheet(title="relative_link_issues")
+    diagnostics_worksheet.append(["Источник", "Исходный href", "Получившийся URL"])
+    for row in suspicious_relative_link_rows:
+        diagnostics_worksheet.append([row.source_url, row.href, row.url])
+
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 def _build_xlsx_bytes_from_rows(*, rows: list[list[str] | list[object]], sheet_name: str) -> bytes:
@@ -1832,6 +1888,17 @@ def _looks_like_internal_query_url(*, href: str, base_url: str, start_netloc: st
     if parsed.netloc.lower() != start_netloc:
         return False
     return bool(parsed.query)
+
+
+def _is_bare_relative_path(href: str) -> bool:
+    """Return whether href is a relative path that lacks an explicit path prefix."""
+
+    normalized_href = href.strip()
+    if not normalized_href or normalized_href.startswith(("/", "./", "../", "#", "?")):
+        return False
+
+    parsed = urlsplit(normalized_href)
+    return not parsed.scheme and not parsed.netloc and bool(parsed.path)
 
 
 def _normalize_absolute_url(url: str) -> str:

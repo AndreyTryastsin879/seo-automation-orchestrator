@@ -1968,6 +1968,7 @@ def _format_task_progress(result_payload: object) -> list[str]:
 
     pages_crawled = result_payload.get("pages_crawled")
     pages_discovered = result_payload.get("pages_discovered")
+    suspicious_relative_links_count = result_payload.get("suspicious_relative_links_count")
     url_count = result_payload.get("url_count")
     resolve_status_codes = result_payload.get("resolve_status_codes")
     resolved_status_count = result_payload.get("resolved_status_count")
@@ -2006,6 +2007,11 @@ def _format_task_progress(result_payload: object) -> list[str]:
         lines.append(f"- последняя точка сохранения: {pages_crawled} страниц")
     if isinstance(pages_discovered, int):
         lines.append(f"- найдено URL: {pages_discovered}")
+    if isinstance(suspicious_relative_links_count, int) and suspicious_relative_links_count:
+        lines.append(
+            "- относительных ссылок без / исключено из обхода: "
+            f"{suspicious_relative_links_count}"
+        )
 
     status_summary = result_payload.get("status_summary")
     if isinstance(status_summary, dict) and status_summary:
