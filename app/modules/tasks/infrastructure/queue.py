@@ -5,6 +5,7 @@ from __future__ import annotations
 from redis import Redis
 from rq import Queue
 
+from app.core.logging import get_logger, log_event
 from app.core.redis import get_redis_connection
 
 DEFAULT_TASK_QUEUE_NAME = "tasks"
@@ -24,6 +25,7 @@ JOB_TIMEOUT_BY_TASK_TYPE: dict[str, int] = {
     "fetch_sitemap": SITEMAP_JOB_TIMEOUT_SECONDS,
     "fetch_robots": SITEMAP_JOB_TIMEOUT_SECONDS,
 }
+LOGGER = get_logger("app.tasks.queue")
 
 
 class TaskQueue:
@@ -44,3 +46,11 @@ class TaskQueue:
         if self._queue.name == CRAWL_HEAVY_QUEUE_NAME and task_type == "crawl_site":
             job_timeout = HEAVY_CRAWL_JOB_TIMEOUT_SECONDS
         self._queue.enqueue(TASK_EXECUTION_JOB, task_id, job_timeout=job_timeout)
+        log_event(
+            LOGGER,
+            "task_enqueued",
+            task_id=task_id,
+            task_type=task_type,
+            queue_name=self._queue.name,
+            job_timeout_seconds=job_timeout,
+        )

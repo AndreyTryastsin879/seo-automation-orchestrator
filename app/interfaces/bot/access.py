@@ -11,12 +11,14 @@ from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove, TelegramO
 
 from app.core.config import get_settings
 from app.core.db import SessionFactory
+from app.core.logging import get_logger, log_event
 from app.core.redis import get_redis_connection
 from app.interfaces.bot.keyboards import build_main_menu_keyboard, build_phone_access_keyboard
 from app.modules.bot_access.application import normalize_phone_number
 from app.modules.bot_access.infrastructure import BotAccessUserRepository
 
 AUTHORIZED_PHONE_KEY_PREFIX = "bot_access:user_phone:"
+LOGGER = get_logger("app.access")
 
 
 def _root_admin_phone_numbers() -> set[str]:
@@ -177,11 +179,14 @@ class BotAccessMiddleware(BaseMiddleware):
                         "Главное меню доступно ниже.",
                         reply_markup=build_main_menu_keyboard(),
                     )
+                    log_event(LOGGER, "bot_access_granted", telegram_user_id=user.id)
                     return
 
+                log_event(LOGGER, "bot_access_denied", level=30, telegram_user_id=user.id)
                 await _prompt_for_phone(event, invalid_phone=True)
                 return
 
+            log_event(LOGGER, "bot_access_contact_requested", telegram_user_id=user.id)
             await _prompt_for_phone(event)
             return
 
@@ -192,6 +197,7 @@ class BotAccessMiddleware(BaseMiddleware):
             if _is_authorized_user(user.id):
                 return await handler(event, data)
 
+            log_event(LOGGER, "bot_callback_access_denied", level=30, telegram_user_id=user.id)
             await event.answer("Сначала подтвердите доступ по номеру телефона.", show_alert=True)
             if event.message is not None:
                 await _prompt_for_phone(event.message)

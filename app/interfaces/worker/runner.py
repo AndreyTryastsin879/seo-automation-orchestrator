@@ -11,9 +11,12 @@ from rq.registry import StartedJobRegistry
 
 from app.core.config import get_settings
 from app.core.db import SessionFactory
+from app.core.logging import get_logger, log_event
 from app.modules.tasks.domain import TaskStatus
 from app.modules.tasks.infrastructure import TaskRepository
 from app.modules.tasks.infrastructure.queue import DEFAULT_TASK_QUEUE_NAME, TASK_QUEUE_NAMES
+
+LOGGER = get_logger("app.worker.runner")
 
 
 def run_worker() -> None:
@@ -23,12 +26,18 @@ def run_worker() -> None:
     redis_conn = Redis.from_url(settings.redis_url)
     queue_name = os.environ.get("RQ_QUEUE", DEFAULT_TASK_QUEUE_NAME)
     queue = Queue(queue_name, connection=redis_conn)
-    _reconcile_abandoned_running_tasks(queue)
+    reconciled_tasks = _reconcile_abandoned_running_tasks(queue)
+    log_event(
+        LOGGER,
+        "worker_started",
+        queue_name=queue_name,
+        reconciled_tasks=reconciled_tasks,
+    )
     worker = Worker([queue], connection=redis_conn)
     worker.work()
 
 
-def _reconcile_abandoned_running_tasks(queue: Queue) -> None:
+def _reconcile_abandoned_running_tasks(queue: Queue) -> int:
     """Mark DB tasks as finished when RQ no longer has them as started jobs."""
 
     started_task_ids: set[int] = set()
@@ -51,9 +60,10 @@ def _reconcile_abandoned_running_tasks(queue: Queue) -> None:
         repository = TaskRepository(session)
         running_tasks = repository.list_by_statuses(statuses=(TaskStatus.RUNNING,))
         if not running_tasks:
-            return
+            return 0
 
         now = datetime.now(UTC)
+        reconciled_tasks = 0
         for task in running_tasks:
             if task.id in started_task_ids:
                 continue
@@ -64,7 +74,9 @@ def _reconcile_abandoned_running_tasks(queue: Queue) -> None:
             elif not task.error_message:
                 task.error_message = "Задача прервана: worker был остановлен или потерял выполнение."
             repository.update(task)
+            reconciled_tasks += 1
 
         session.commit()
+        return reconciled_tasks
     finally:
         session.close()

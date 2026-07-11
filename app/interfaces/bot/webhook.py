@@ -9,10 +9,12 @@ from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request, status
 
 from app.core.config import get_settings
+from app.core.logging import configure_logging, get_logger, log_event
 from app.interfaces.bot.app import create_bot, create_dispatcher
 
 WEBHOOK_PATH = "/bot/webhook"
 HEALTH_PATH = "/bot/health"
+LOGGER = get_logger("app.bot.webhook")
 
 
 def _validate_webhook_secret(received_secret: str | None) -> None:
@@ -52,15 +54,18 @@ async def _lifespan(app: FastAPI):
     app.state.bot = bot
     app.state.dispatcher = dispatcher
     await _configure_webhook(bot)
+    log_event(LOGGER, "bot_webhook_started", webhook_configured=bool(get_settings().bot_webhook_url))
     try:
         yield
     finally:
+        log_event(LOGGER, "bot_webhook_stopped")
         await bot.session.close()
 
 
 def create_webhook_app() -> FastAPI:
     """Create a FastAPI application for Telegram webhook delivery."""
 
+    configure_logging(service="bot_webhook")
     app = FastAPI(title="SEO Automation Orchestrator Bot Webhook", lifespan=_lifespan)
 
     @app.get(HEALTH_PATH)

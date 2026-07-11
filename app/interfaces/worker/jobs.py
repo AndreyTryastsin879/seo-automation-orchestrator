@@ -20,6 +20,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from sqlalchemy import update
 
 import app.core.models  # noqa: F401
+from app.core.logging import get_logger, log_event, log_exception
 from app.core.slug import slugify
 from app.core.storage import LocalFileStorage
 from app.core.db import SessionFactory, engine
@@ -47,6 +48,7 @@ NON_HTML_EXTENSIONS = {
     ".tiff",
     ".avif",
 }
+LOGGER = get_logger("app.worker.jobs")
 
 
 @dataclass(slots=True, frozen=True)
@@ -300,6 +302,15 @@ def execute_task(task_id: int) -> None:
             return
 
         task_exists = True
+        log_event(
+            LOGGER,
+            "task_started",
+            task_id=task.id,
+            task_type=task.task_type,
+            queue_name=task.queue_name,
+            batch_id=task.batch_id,
+            project_id=task.project_id,
+        )
         session.execute(
             update(Task)
             .where(Task.id == task_id)
@@ -338,6 +349,15 @@ def execute_task(task_id: int) -> None:
             )
         )
         session.commit()
+        log_event(
+            LOGGER,
+            "task_finished",
+            task_id=task.id,
+            task_type=task.task_type,
+            queue_name=task.queue_name,
+            pages_crawled=execution_result.result_payload.get("pages_crawled"),
+            pages_discovered=execution_result.result_payload.get("pages_discovered"),
+        )
 
     except Exception as error:
         session.rollback()
@@ -371,6 +391,24 @@ def execute_task(task_id: int) -> None:
                 )
             )
             session.commit()
+            if isinstance(error, _TaskCancellationRequestedError):
+                log_event(
+                    LOGGER,
+                    "task_cancelled",
+                    level=30,
+                    task_id=task.id if task is not None else task_id,
+                    task_type=task.task_type if task is not None else None,
+                    queue_name=task.queue_name if task is not None else None,
+                )
+            else:
+                log_exception(
+                    LOGGER,
+                    "task_failed",
+                    task_id=task.id if task is not None else task_id,
+                    task_type=task.task_type if task is not None else None,
+                    queue_name=task.queue_name if task is not None else None,
+                    error_type=type(error).__name__,
+                )
 
     finally:
         session.close()
@@ -630,6 +668,16 @@ def _execute_crawl_site_task(task_id: int, payload: JsonPayload | None) -> _Task
     retry_delay_ms = _get_non_negative_int_with_default(payload, "retry_delay_ms", default=1000)
 
     normalized_start_url = _normalize_crawl_url(start_url.strip())
+    log_event(
+        LOGGER,
+        "crawl_started",
+        task_id=task_id,
+        site_host=urlsplit(normalized_start_url).netloc,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        max_concurrency=max_concurrency,
+        follow_links=follow_links,
+    )
     try:
         crawl_result = asyncio.run(
             _run_crawler(
@@ -897,6 +945,14 @@ def _checkpoint_crawl_progress(
             file_size=csv_file.size,
         )
         session.commit()
+        log_event(
+            LOGGER,
+            "crawl_checkpoint_saved",
+            task_id=task_id,
+            pages_crawled=crawl_result.pages_crawled,
+            pages_discovered=crawl_result.pages_discovered,
+            last_processed_host=urlsplit(last_processed_url).netloc if last_processed_url else None,
+        )
     finally:
         session.close()
 
