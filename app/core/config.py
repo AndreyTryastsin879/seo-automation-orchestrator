@@ -22,6 +22,7 @@ class Settings:
     bot_webhook_url: str | None
     bot_webhook_secret: str | None
     bot_allowed_phone_numbers: tuple[str, ...]
+    secrets_encryption_key: str | None
 
 
 def _as_bool(value: str, *, default: bool = False) -> bool:
@@ -67,4 +68,5 @@ def get_settings() -> Settings:
         bot_webhook_url=os.getenv("BOT_WEBHOOK_URL"),
         bot_webhook_secret=os.getenv("BOT_WEBHOOK_SECRET"),
         bot_allowed_phone_numbers=_as_phone_tuple(os.getenv("BOT_ALLOWED_PHONE_NUMBERS")),
+        secrets_encryption_key=os.getenv("SECRETS_ENCRYPTION_KEY"),
     )

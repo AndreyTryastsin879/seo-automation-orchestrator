@@ -12,6 +12,8 @@ class TaskBatchType(StrEnum):
     SITEMAP_ALL_PROJECTS = "sitemap_all_projects"
     SITEMAP_PROJECT = "sitemap_project"
     SITEMAP_ADHOC = "sitemap_adhoc"
+    YANDEX_WEBMASTER_RECRAWL_PROJECT = "yandex_webmaster_recrawl_project"
+    YANDEX_WEBMASTER_RECRAWL_ALL = "yandex_webmaster_recrawl_all"
 
 
 class TaskBatchStatus(StrEnum):

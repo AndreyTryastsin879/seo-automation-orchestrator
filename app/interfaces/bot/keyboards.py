@@ -5,7 +5,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.interfaces.bot.services import RecentBatchSummary, RecentTaskSummary
+from app.interfaces.bot.services import RecentBatchSummary, RecentTaskSummary, YandexRecrawlProjectSummary
 from app.interfaces.bot.services import CrawlLaunchSettings
 from app.modules.bot_access.application import BotAccessUserDTO
 from app.modules.projects.application import ProjectDTO
@@ -17,6 +17,7 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Парсинг"), KeyboardButton(text="Парсинг sitemap")],
+            [KeyboardButton(text="Индексирование")],
             [KeyboardButton(text="Проекты"), KeyboardButton(text="Статус")],
             [KeyboardButton(text="Доступ")],
         ],
@@ -99,7 +100,75 @@ def build_sitemap_actions_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def build_sitemap_settings_keyboard(*, resolve_status_codes: bool) -> InlineKeyboardMarkup:
+def build_indexing_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build the first-level indexing actions."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Яндекс Вебмастер", callback_data="indexing:yandex")
+    builder.button(text="Подключение Яндекс", callback_data="indexing:yandex:connection")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_yandex_webmaster_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build available Yandex Webmaster indexing actions."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Отправить на переобход", callback_data="indexing:yandex:recrawl")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_yandex_token_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build the root-admin action for replacing the shared Yandex token."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Обновить токен", callback_data="indexing:yandex:connection:update")
+    return builder.as_markup()
+
+
+def build_yandex_recrawl_projects_keyboard(projects: list[YandexRecrawlProjectSummary]) -> InlineKeyboardMarkup:
+    """Build project selection with queue count and Yandex host readiness."""
+
+    builder = InlineKeyboardBuilder()
+    for summary in projects:
+        host_state = "хост OK" if summary.has_yandex_host else "нет хоста"
+        builder.button(
+            text=f"{summary.project.project_name} · {summary.queue_count} URL · {host_state}",
+            callback_data=f"indexing:yandex:project:{summary.project.id}",
+        )
+    builder.button(text="Отправить все", callback_data="indexing:yandex:all")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_yandex_recrawl_project_keyboard(project_id: int, *, queue_count: int) -> InlineKeyboardMarkup:
+    """Build launch and priority insertion actions for one project queue."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Отправить сейчас ({queue_count})", callback_data=f"indexing:yandex:send:{project_id}")
+    builder.button(text="Добавить URL в начало", callback_data=f"indexing:yandex:add:first:{project_id}")
+    builder.button(text="Добавить URL в конец", callback_data=f"indexing:yandex:add:last:{project_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_yandex_recrawl_collect_keyboard(*, url_count: int) -> InlineKeyboardMarkup:
+    """Build actions for a multi-message queue insertion buffer."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Добавить в очередь ({url_count})", callback_data="indexing:yandex:add:save")
+    builder.button(text="Очистить список", callback_data="indexing:yandex:add:reset")
+    builder.button(text="Отмена", callback_data="indexing:yandex:add:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_sitemap_settings_keyboard(
+    *,
+    resolve_status_codes: bool,
+    replace_yandex_recrawl_queue: bool,
+) -> InlineKeyboardMarkup:
     """Build sitemap parsing settings keyboard."""
 
     builder = InlineKeyboardBuilder()
@@ -107,6 +176,11 @@ def build_sitemap_settings_keyboard(*, resolve_status_codes: bool) -> InlineKeyb
     builder.button(
         text=f"Определять код ответа сервера: {state_text}",
         callback_data="sitemap:settings:toggle:resolve_status_codes",
+    )
+    queue_state_text = "ON" if replace_yandex_recrawl_queue else "OFF"
+    builder.button(
+        text=f"Добавить в очередь на переобход: {queue_state_text}",
+        callback_data="sitemap:settings:toggle:replace_yandex_recrawl_queue",
     )
     builder.adjust(1)
     return builder.as_markup()

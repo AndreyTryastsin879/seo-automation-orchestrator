@@ -25,6 +25,7 @@ from app.interfaces.bot.keyboards import (
     build_heavy_project_selection_keyboard,
     build_heavy_setting_values_keyboard,
     build_heavy_settings_menu_keyboard,
+    build_indexing_actions_keyboard,
     build_main_menu_keyboard,
     build_parsing_actions_keyboard,
     build_parsing_settings_keyboard,
@@ -42,6 +43,11 @@ from app.interfaces.bot.keyboards import (
     build_sitemap_project_selection_keyboard,
     build_sitemap_robots_actions_keyboard,
     build_sitemap_settings_keyboard,
+    build_yandex_recrawl_collect_keyboard,
+    build_yandex_recrawl_project_keyboard,
+    build_yandex_recrawl_projects_keyboard,
+    build_yandex_token_actions_keyboard,
+    build_yandex_webmaster_actions_keyboard,
     build_url_list_profile_keyboard,
     build_robots_project_selection_keyboard,
     build_status_actions_keyboard,
@@ -49,6 +55,7 @@ from app.interfaces.bot.keyboards import (
 )
 from app.interfaces.bot.services import (
     add_allowed_bot_user,
+    add_yandex_recrawl_urls,
     launch_ad_hoc_robots,
     launch_ad_hoc_sitemap,
     launch_ad_hoc_url_list_crawl,
@@ -65,17 +72,21 @@ from app.interfaces.bot.services import (
     get_project,
     get_batch_status,
     get_task_status,
+    launch_all_projects_yandex_recrawl,
+    launch_project_yandex_recrawl,
     launch_all_projects_crawl,
     launch_project_crawl,
     launch_project_robots,
     launch_project_sitemap,
     launch_ad_hoc_crawl,
     list_all_projects,
+    list_yandex_recrawl_projects,
     list_recent_batches,
     list_projects,
     remove_allowed_bot_user,
     update_project,
 )
+from app.modules.yandex_oauth.service import get_yandex_connection_status, save_yandex_access_token
 
 router = Router(name="main_bot")
 CRAWL_SETTINGS_STATE_KEY = "crawl_settings"
@@ -83,6 +94,9 @@ HEAVY_CRAWL_SETTINGS_STATE_KEY = "heavy_crawl_settings"
 ADHOC_CRAWL_PROFILE_STATE_KEY = "adhoc_crawl_profile"
 SITEMAP_SETTINGS_STATE_KEY = "sitemap_settings"
 ADHOC_URL_LIST_BUFFER_STATE_KEY = "adhoc_url_list_buffer"
+YANDEX_RECRAWL_URL_BUFFER_STATE_KEY = "yandex_recrawl_url_buffer"
+YANDEX_RECRAWL_PROJECT_ID_STATE_KEY = "yandex_recrawl_project_id"
+YANDEX_RECRAWL_POSITION_STATE_KEY = "yandex_recrawl_position"
 HEAVY_CONCURRENCY_OPTIONS = (1, 2, 3, 4, 5)
 HEAVY_PAGE_OPTIONS = (5000, 25000, 100000, 150000, 200000, 250000)
 HEAVY_DELAY_OPTIONS = (250, 500, 1000, 2000, 5000)
@@ -102,6 +116,18 @@ class AdHocUrlListStates(StatesGroup):
     """FSM states for launching a fixed URL list crawl."""
 
     waiting_for_urls = State()
+
+
+class YandexRecrawlUrlListStates(StatesGroup):
+    """FSM states for adding URLs to a Yandex recrawl queue."""
+
+    waiting_for_urls = State()
+
+
+class YandexAccessTokenStates(StatesGroup):
+    """FSM state for receiving the shared Yandex OAuth token from the root admin."""
+
+    waiting_for_token = State()
 
 
 class AdHocSitemapStates(StatesGroup):
@@ -273,6 +299,17 @@ async def handle_sitemap_menu(message: Message) -> None:
     )
 
 
+@router.message(F.text == "Индексирование")
+async def handle_indexing_menu(message: Message, state: FSMContext) -> None:
+    """Open the indexing section."""
+
+    await _clear_flow_state_preserving_settings(state)
+    await message.answer(
+        "Раздел индексирования.\nВыбери сервис и действие.",
+        reply_markup=build_indexing_actions_keyboard(),
+    )
+
+
 @router.message(F.text == "Статус")
 async def handle_status_menu(message: Message) -> None:
     """Open task status section."""
@@ -439,6 +476,225 @@ async def handle_sitemap_projects(callback: CallbackQuery, state: FSMContext) ->
     )
 
 
+@router.callback_query(F.data == "indexing:yandex")
+async def handle_yandex_indexing_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Open Yandex Webmaster indexing actions."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        "Яндекс Вебмастер.\nВыбери действие.",
+        reply_markup=build_yandex_webmaster_actions_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "indexing:yandex:connection")
+async def handle_yandex_connection(callback: CallbackQuery, state: FSMContext) -> None:
+    """Show current shared Yandex OAuth connection state."""
+
+    await callback.answer()
+    connected, expires_at, is_manual_token = get_yandex_connection_status()
+    user = callback.from_user
+    if not connected:
+        if user is not None and is_root_admin_user(user.id):
+            await _request_yandex_access_token(callback.message, state)
+            return
+        await callback.message.answer(
+            "Яндекс пока не подключён.\n\n"
+            "Попроси root-админа подключить аккаунт Яндекс в этом разделе."
+        )
+        return
+    lines = ["Яндекс подключён."]
+    if expires_at is not None:
+        lines.append(f"Обновить токен до: {expires_at.date().isoformat()}")
+    if is_manual_token:
+        lines.append("Токен введён вручную и хранится в зашифрованном виде.")
+    reply_markup = build_yandex_token_actions_keyboard() if user is not None and is_root_admin_user(user.id) else None
+    await callback.message.answer("\n".join(lines), reply_markup=reply_markup)
+
+
+@router.callback_query(F.data == "indexing:yandex:connection:update")
+async def handle_yandex_connection_update(callback: CallbackQuery, state: FSMContext) -> None:
+    """Ask the root admin for a replacement Yandex OAuth token."""
+
+    await callback.answer()
+    user = callback.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await callback.message.answer("Заменить токен может только root-админ.")
+        return
+    await _request_yandex_access_token(callback.message, state)
+
+
+async def _request_yandex_access_token(message: Message, state: FSMContext) -> None:
+    """Start secure manual Yandex token collection for the root admin."""
+
+    await _clear_flow_state_preserving_settings(state)
+    await state.set_state(YandexAccessTokenStates.waiting_for_token)
+    await message.answer(
+        "Пришли OAuth-токен Яндекс Вебмастера одним сообщением.\n\n"
+        "После сохранения бот удалит сообщение с токеном и зашифрует его в базе.\n"
+        "Инструкция по выпуску токена: https://yandex.ru/dev/webmaster/doc/ru/tasks/how-to-get-oauth\n\n"
+        "Для отмены отправь /cancel."
+    )
+
+
+@router.callback_query(F.data == "indexing:yandex:recrawl")
+async def handle_yandex_recrawl_projects(callback: CallbackQuery, state: FSMContext) -> None:
+    """List every project for Yandex Webmaster recrawl actions."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    projects = list_yandex_recrawl_projects()
+    if not projects:
+        await callback.message.answer("Список проектов пока пуст.")
+        return
+    await callback.message.answer(
+        "Выбери проект.\n\n"
+        "В строке показано число URL в очереди и состояние хоста Яндекс Вебмастера.",
+        reply_markup=build_yandex_recrawl_projects_keyboard(projects),
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:yandex:project:"))
+async def handle_yandex_recrawl_project(callback: CallbackQuery) -> None:
+    """Show actions for one selected Yandex recrawl queue."""
+
+    await callback.answer()
+    raw_project_id = callback.data.rsplit(":", 1)[-1]
+    try:
+        project_id = int(raw_project_id)
+    except ValueError:
+        await callback.message.answer("Не удалось определить проект.")
+        return
+    summary = next(
+        (item for item in list_yandex_recrawl_projects() if item.project.id == project_id),
+        None,
+    )
+    if summary is None:
+        await callback.message.answer("Проект не найден.")
+        return
+    host_text = "настроен" if summary.has_yandex_host else "не заполнен"
+    await callback.message.answer(
+        f"Проект: {summary.project.project_name}\n"
+        f"URL в очереди: {summary.queue_count}\n"
+        f"Хост Яндекс Вебмастера: {host_text}",
+        reply_markup=build_yandex_recrawl_project_keyboard(project_id, queue_count=summary.queue_count),
+    )
+
+
+@router.callback_query(F.data == "indexing:yandex:all")
+async def handle_yandex_recrawl_all(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch all ready project recrawl queues sequentially."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    try:
+        result = launch_all_projects_yandex_recrawl()
+    except Exception:
+        await callback.message.answer("Не удалось запустить переобход всех проектов.")
+        return
+    if result.batch is None:
+        await callback.message.answer("Нет проектов с URL в очереди и настроенным хостом Яндекс Вебмастера.")
+        return
+    await callback.message.answer(
+        "Переобход запущен.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проектов в запуске: {result.total_projects}\n"
+        f"Пропущено: {result.skipped_projects}\n\n"
+        "Проекты будут обработаны по очереди."
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:yandex:send:"))
+async def handle_yandex_recrawl_send(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch a selected project recrawl queue."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    try:
+        project_id = int(callback.data.rsplit(":", 1)[-1])
+        result = launch_project_yandex_recrawl(project_id)
+    except ValueError as exc:
+        await callback.message.answer(str(exc))
+        return
+    except Exception:
+        await callback.message.answer("Не удалось запустить переобход проекта.")
+        return
+    await callback.message.answer(
+        "Переобход запущен.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проект: {result.project.project_name}\n"
+        f"Task ID: {result.task.id}\n\n"
+        "Статус и обновлённый отчет будут доступны в разделе «Статус»."
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:yandex:add:"))
+async def handle_yandex_recrawl_add_action(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start, clear, save or cancel URL collection for a selected queue edge."""
+
+    await callback.answer()
+    action = callback.data.split(":")[3]
+    if action in {"first", "last"}:
+        try:
+            project_id = int(callback.data.rsplit(":", 1)[-1])
+        except ValueError:
+            await callback.message.answer("Не удалось определить проект.")
+            return
+        await state.set_state(YandexRecrawlUrlListStates.waiting_for_urls)
+        await state.update_data(
+            {
+                YANDEX_RECRAWL_PROJECT_ID_STATE_KEY: project_id,
+                YANDEX_RECRAWL_POSITION_STATE_KEY: action,
+                YANDEX_RECRAWL_URL_BUFFER_STATE_KEY: [],
+            }
+        )
+        position_text = "в начало" if action == "first" else "в конец"
+        await callback.message.answer(
+            f"Отправь список URL для добавления {position_text} очереди.\n\n"
+            "Можно прислать список в нескольких сообщениях или `.txt` файл.\n"
+            "Когда закончишь, нажми «Добавить в очередь»."
+        )
+        return
+    if action == "reset":
+        lock = _get_url_list_buffer_lock(callback.message.chat.id, callback.from_user.id)
+        async with lock:
+            await state.update_data({YANDEX_RECRAWL_URL_BUFFER_STATE_KEY: []})
+        await callback.message.answer("Список очищен. Пришли новые URL.")
+        return
+    if action == "cancel":
+        await _clear_flow_state_preserving_settings(state)
+        await callback.message.answer("Добавление URL отменено.")
+        return
+    if action != "save":
+        return
+    lock = _get_url_list_buffer_lock(callback.message.chat.id, callback.from_user.id)
+    async with lock:
+        data = await state.get_data()
+        raw_urls = data.get(YANDEX_RECRAWL_URL_BUFFER_STATE_KEY)
+        project_id = data.get(YANDEX_RECRAWL_PROJECT_ID_STATE_KEY)
+        position = data.get(YANDEX_RECRAWL_POSITION_STATE_KEY)
+        urls = [item for item in raw_urls if isinstance(item, str) and item.strip()] if isinstance(raw_urls, list) else []
+    if not isinstance(raw_urls, list) or not raw_urls or not isinstance(project_id, int):
+        await callback.message.answer("Список URL пока пуст.")
+        return
+    try:
+        project, added_count, total_count = add_yandex_recrawl_urls(
+            project_id,
+            urls,
+            prepend=position == "first",
+        )
+    except ValueError as exc:
+        await callback.message.answer(str(exc))
+        return
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        f"Очередь проекта «{project.project_name}» обновлена.\n\n"
+        f"Добавлено: {added_count}\n"
+        f"Всего в очереди: {total_count}"
+    )
+
+
 @router.callback_query(F.data == "sitemap:adhoc")
 async def handle_sitemap_adhoc(callback: CallbackQuery, state: FSMContext) -> None:
     """Start ad-hoc sitemap parsing by URL."""
@@ -508,6 +764,7 @@ async def handle_sitemap_all_projects(callback: CallbackQuery, state: FSMContext
         sitemap_settings = await _get_sitemap_settings(state)
         result = launch_all_projects_sitemap(
             resolve_status_codes=sitemap_settings["resolve_status_codes"],
+            replace_yandex_recrawl_queue=sitemap_settings["replace_yandex_recrawl_queue"],
         )
     except ValueError as exc:
         await callback.message.answer(str(exc))
@@ -538,13 +795,17 @@ async def handle_sitemap_settings(callback: CallbackQuery, state: FSMContext) ->
     await _send_sitemap_settings(callback.message, state)
 
 
-@router.callback_query(F.data == "sitemap:settings:toggle:resolve_status_codes")
+@router.callback_query(F.data.startswith("sitemap:settings:toggle:"))
 async def handle_sitemap_settings_toggle(callback: CallbackQuery, state: FSMContext) -> None:
-    """Toggle sitemap server-response-code resolution."""
+    """Toggle one sitemap parsing setting."""
 
     await callback.answer()
     settings = await _get_sitemap_settings(state)
-    settings["resolve_status_codes"] = not settings["resolve_status_codes"]
+    setting_name = callback.data.rsplit(":", 1)[-1]
+    if setting_name not in {"resolve_status_codes", "replace_yandex_recrawl_queue"}:
+        await callback.message.answer("Неизвестная настройка sitemap.")
+        return
+    settings[setting_name] = not settings[setting_name]
     await _set_sitemap_settings(state, settings)
     await _send_sitemap_settings(callback.message, state)
 
@@ -970,6 +1231,7 @@ async def handle_sitemap_project_launch(callback: CallbackQuery, state: FSMConte
         result = launch_project_sitemap(
             project_id,
             resolve_status_codes=sitemap_settings["resolve_status_codes"],
+            replace_yandex_recrawl_queue=sitemap_settings["replace_yandex_recrawl_queue"],
         )
     except ValueError as exc:
         await callback.message.answer(str(exc))
@@ -1435,6 +1697,97 @@ async def handle_adhoc_url_list_input(message: Message, state: FSMContext) -> No
     )
 
 
+@router.message(YandexRecrawlUrlListStates.waiting_for_urls)
+async def handle_yandex_recrawl_url_list_input(message: Message, state: FSMContext) -> None:
+    """Accumulate URL additions, including Telegram-split text and TXT documents."""
+
+    raw_urls = await _extract_urls_from_message(message)
+    if raw_urls is None:
+        return
+    if not raw_urls:
+        await message.answer("Не удалось распознать URL. Отправь адреса сообщением или `.txt` файлом.")
+        return
+    user_id = message.from_user.id if message.from_user else 0
+    lock = _get_url_list_buffer_lock(message.chat.id, user_id)
+    async with lock:
+        data = await state.get_data()
+        buffered_urls = data.get(YANDEX_RECRAWL_URL_BUFFER_STATE_KEY)
+        if not isinstance(buffered_urls, list):
+            buffered_urls = []
+        buffered_urls.extend(raw_urls)
+        await state.update_data({YANDEX_RECRAWL_URL_BUFFER_STATE_KEY: buffered_urls})
+        total_count = len(buffered_urls)
+    await message.answer(
+        "Список URL обновлён.\n\n"
+        f"Добавлено в этом сообщении: {len(raw_urls)}\n"
+        f"Всего в буфере: {total_count}\n\n"
+        "Можешь прислать ещё одну порцию URL или нажать «Добавить в очередь».",
+        reply_markup=build_yandex_recrawl_collect_keyboard(url_count=total_count),
+    )
+
+
+@router.message(YandexAccessTokenStates.waiting_for_token)
+async def handle_yandex_access_token_input(message: Message, state: FSMContext) -> None:
+    """Store the root-admin's manually issued Yandex OAuth token."""
+
+    user = message.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await _clear_flow_state_preserving_settings(state)
+        await message.answer("Добавить токен может только root-админ.")
+        return
+    token = (message.text or "").strip()
+    if not token or token.startswith("/"):
+        await message.answer("Пришли OAuth-токен Яндекс одним сообщением или отправь /cancel.")
+        return
+    try:
+        expires_at = save_yandex_access_token(token)
+    except (RuntimeError, ValueError) as error:
+        await message.answer(f"Не удалось сохранить токен: {error}")
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await _clear_flow_state_preserving_settings(state)
+    await message.answer(
+        "Токен Яндекс сохранён.\n\n"
+        f"Плановая дата обновления: {expires_at.date().isoformat()}.\n"
+        "Сообщение с токеном удалено из чата."
+    )
+
+
+async def _extract_urls_from_message(message: Message) -> list[str] | None:
+    """Extract URL lines from text or a supported TXT attachment."""
+
+    raw_text = (message.text or "").strip()
+    if raw_text.startswith("/"):
+        await message.answer("Сначала заверши текущий сценарий через /cancel или пришли список URL.")
+        return None
+    if raw_text:
+        return [line.strip() for line in raw_text.splitlines() if line.strip()]
+    if message.document is None:
+        await message.answer("Не вижу список URL. Отправь адреса сообщением или `.txt` файлом.")
+        return None
+
+    file_name = (message.document.file_name or "").lower()
+    mime_type = (message.document.mime_type or "").lower()
+    if not file_name.endswith(".txt") and mime_type not in {"text/plain", "application/octet-stream"}:
+        await message.answer("Поддерживается только `.txt` файл со списком URL, один URL на строку.")
+        return None
+    file = await message.bot.get_file(message.document.file_id)
+    buffer = io.BytesIO()
+    await message.bot.download(file, destination=buffer)
+    file_bytes = buffer.getvalue()
+    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+        try:
+            decoded_text = file_bytes.decode(encoding)
+            return [line.strip() for line in decoded_text.splitlines() if line.strip()]
+        except UnicodeDecodeError:
+            continue
+    await message.answer("Не удалось прочитать `.txt` файл. Сохрани его в UTF-8 или Windows-1251.")
+    return None
+
+
 @router.message(AdHocSitemapStates.waiting_for_url)
 async def handle_adhoc_sitemap_url_input(message: Message, state: FSMContext) -> None:
     """Create an ad-hoc sitemap parsing task from a user-provided URL."""
@@ -1649,11 +2002,16 @@ async def _send_sitemap_settings(message: Message, state: FSMContext) -> None:
     await _edit_or_answer(
         message,
         "Настройки парсинга sitemap:\n\n"
-        f"- определять код ответа сервера: {'да' if resolve_status_codes else 'нет'}\n\n"
+        f"- определять код ответа сервера: {'да' if resolve_status_codes else 'нет'}\n"
+        "- добавлять в очередь на переобход: "
+        f"{'да' if settings['replace_yandex_recrawl_queue'] else 'нет'}\n\n"
         "Если настройка выключена, sitemap будет разбираться и выгружаться без проверки HTTP-статуса каждой URL. "
-        "Это особенно полезно для очень больших карт сайта.",
+        "Это особенно полезно для очень больших карт сайта.\n\n"
+        "При включении URL из sitemap выбранного проекта заменят его файл очереди "
+        "на переобход. Для режимов «Свой URL» и «Из robots.txt» очередь не меняется.",
         reply_markup=build_sitemap_settings_keyboard(
             resolve_status_codes=resolve_status_codes,
+            replace_yandex_recrawl_queue=settings["replace_yandex_recrawl_queue"],
         ),
     )
 
@@ -1805,7 +2163,9 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         return
 
     if not has_xlsx and not has_csv:
-        if task.task_type == "fetch_robots":
+        if task.task_type == "yandex_webmaster_recrawl":
+            lines.extend(_format_yandex_recrawl_completion(task.result_payload, has_report=False))
+        elif task.task_type == "fetch_robots":
             lines.extend(["", "Парсинг robots.txt завершён."])
         else:
             lines.extend(["", "Парсинг завершён, но файлы результата пока не найдены."])
@@ -1813,7 +2173,10 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         await message.answer("\n".join(lines), reply_markup=reply_markup)
         return
 
-    lines.extend(["", "Парсинг завершён.", "Файлы результата готовы."])
+    if task.task_type == "yandex_webmaster_recrawl":
+        lines.extend(_format_yandex_recrawl_completion(task.result_payload, has_report=True))
+    else:
+        lines.extend(["", "Парсинг завершён.", "Файлы результата готовы."])
     await message.answer("\n".join(lines))
     if has_xlsx and result.xlsx_path is not None:
         await message.answer_document(FSInputFile(result.xlsx_path))
@@ -1821,6 +2184,28 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         await message.answer_document(FSInputFile(result.csv_path))
     if clear_to_menu:
         await message.answer("Готово.", reply_markup=build_main_menu_keyboard())
+
+
+def _format_yandex_recrawl_completion(result_payload: object, *, has_report: bool) -> list[str]:
+    """Describe a recrawl task without calling it a parsing result."""
+
+    payload = result_payload if isinstance(result_payload, dict) else {}
+    status = payload.get("indexing_status")
+    remaining_pages = payload.get("remaining_pages")
+    lines = [""]
+    if status == "completed":
+        lines.append("Отправка на переобход завершена.")
+    elif status == "quota_reached":
+        lines.append("Достигнута квота Яндекс Вебмастера. Неотправленные URL остались в очереди.")
+    elif isinstance(status, str) and status.startswith("api_error_"):
+        lines.append("Отправка на переобход приостановлена из-за ошибки API. Неотправленные URL остались в очереди.")
+    else:
+        lines.append("Отправка на переобход завершена.")
+    if isinstance(remaining_pages, int) and remaining_pages:
+        lines.append(f"В очереди осталось: {remaining_pages} URL.")
+    if has_report:
+        lines.append("Файл отчета готов.")
+    return lines
 
 
 async def _get_crawl_settings(state: FSMContext) -> CrawlLaunchSettings:
@@ -1855,9 +2240,13 @@ async def _get_sitemap_settings(state: FSMContext) -> dict[str, bool]:
     data = await state.get_data()
     raw_settings = data.get(SITEMAP_SETTINGS_STATE_KEY)
     if not isinstance(raw_settings, dict):
-        return {"resolve_status_codes": True}
+        return {
+            "resolve_status_codes": True,
+            "replace_yandex_recrawl_queue": False,
+        }
     return {
         "resolve_status_codes": bool(raw_settings.get("resolve_status_codes", True)),
+        "replace_yandex_recrawl_queue": bool(raw_settings.get("replace_yandex_recrawl_queue", False)),
     }
 
 
@@ -1908,6 +2297,7 @@ async def _set_sitemap_settings(state: FSMContext, settings: dict[str, bool]) ->
         {
             SITEMAP_SETTINGS_STATE_KEY: {
                 "resolve_status_codes": bool(settings.get("resolve_status_codes", True)),
+                "replace_yandex_recrawl_queue": bool(settings.get("replace_yandex_recrawl_queue", False)),
             }
         }
     )
@@ -1968,6 +2358,14 @@ def _format_task_progress(result_payload: object) -> list[str]:
 
     pages_crawled = result_payload.get("pages_crawled")
     pages_discovered = result_payload.get("pages_discovered")
+    submitted_pages = result_payload.get("submitted_pages")
+    remaining_pages = result_payload.get("remaining_pages")
+    indexing_status = result_payload.get("indexing_status")
+    indexing_error = result_payload.get("indexing_error")
+    recrawl_pages_per_minute = result_payload.get("recrawl_pages_per_minute")
+    recrawl_checkpoint_at = result_payload.get("recrawl_checkpoint_at")
+    recrawl_queue_replaced = result_payload.get("recrawl_queue_replaced")
+    recrawl_queue_url_count = result_payload.get("recrawl_queue_url_count")
     suspicious_relative_links_count = result_payload.get("suspicious_relative_links_count")
     url_count = result_payload.get("url_count")
     resolve_status_codes = result_payload.get("resolve_status_codes")
@@ -1983,6 +2381,7 @@ def _format_task_progress(result_payload: object) -> list[str]:
         and not isinstance(pages_discovered, int)
         and not isinstance(url_count, int)
         and not isinstance(status_code, int)
+        and not isinstance(submitted_pages, int)
     ):
         return []
 
@@ -2002,11 +2401,25 @@ def _format_task_progress(result_payload: object) -> list[str]:
             )
         if isinstance(resolved_status_count, int) and resolve_status_codes:
             lines.append(f"- URL с определённым кодом ответа: {resolved_status_count}")
+    if recrawl_queue_replaced is True and isinstance(recrawl_queue_url_count, int):
+        lines.append(f"- очередь на переобход обновлена: {recrawl_queue_url_count} URL")
 
     if isinstance(pages_crawled, int):
         lines.append(f"- последняя точка сохранения: {pages_crawled} страниц")
     if isinstance(pages_discovered, int):
         lines.append(f"- найдено URL: {pages_discovered}")
+    if isinstance(submitted_pages, int):
+        lines.append(f"- отправлено на переобход: {submitted_pages}")
+    if isinstance(remaining_pages, int):
+        lines.append(f"- осталось в очереди: {remaining_pages}")
+    if isinstance(recrawl_pages_per_minute, int | float):
+        lines.append(f"- скорость отправки: {recrawl_pages_per_minute:.1f} URL/мин")
+    if isinstance(recrawl_checkpoint_at, str) and recrawl_checkpoint_at:
+        lines.append(f"- обновлено: {recrawl_checkpoint_at}")
+    if isinstance(indexing_status, str) and indexing_status:
+        lines.append(f"- результат отправки: {indexing_status}")
+    if isinstance(indexing_error, str) and indexing_error:
+        lines.append(f"- ошибка API: {indexing_error}")
     if isinstance(suspicious_relative_links_count, int) and suspicious_relative_links_count:
         lines.append(
             "- относительных ссылок без / исключено из обхода: "

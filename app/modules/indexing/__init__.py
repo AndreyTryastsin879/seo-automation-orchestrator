@@ -1,1 +1,1 @@
-"""Indexing module."""
+"""Indexing workflows and file-backed URL queues."""

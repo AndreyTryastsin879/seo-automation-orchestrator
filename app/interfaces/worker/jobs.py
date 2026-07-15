@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 import re
 import socket
 import time
@@ -24,15 +25,25 @@ from app.core.logging import get_logger, log_event, log_exception
 from app.core.slug import slugify
 from app.core.storage import LocalFileStorage
 from app.core.db import SessionFactory, engine
+from app.modules.indexing.yandex_webmaster import (
+    append_indexing_report,
+    get_recrawl_queue_count,
+    peek_recrawl_queue,
+    remove_recrawl_queue_entry,
+    replace_recrawl_urls,
+)
+from app.modules.projects.infrastructure import ProjectRepository
 from app.modules.tasks.domain import JsonPayload
 from app.modules.tasks.domain.enums import TaskStatus
 from app.modules.tasks.infrastructure import Task, TaskFile, TaskFileRepository, TaskRepository
+from app.modules.yandex_oauth.service import get_yandex_access_token
 
 HTTP_TIMEOUT_SECONDS = 15
 SITEMAP_FETCH_TIMEOUT_SECONDS = 30
 SITEMAP_ENTRY_LIMIT = 100
 SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS = 10
 SITEMAP_STATUS_CHECK_MAX_CONCURRENCY = 10
+YANDEX_RECRAWL_PROGRESS_EVERY_URLS = 10
 MAX_REDIRECTS = 10
 CRAWL_PROGRESS_CHECKPOINT_EVERY_PAGES = 50
 NON_HTML_EXTENSIONS = {
@@ -60,6 +71,7 @@ class _TaskExecutionResult:
     export_sitemap_rows: list[tuple[str, int | None]] | None = None
     export_csv_content: str | None = None
     suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow] | None = None
+    report_relative_path: str | None = None
 
 
 class _TaskCancellationRequestedError(RuntimeError):
@@ -337,6 +349,12 @@ def execute_task(task_id: int) -> None:
                 task=task,
                 execution_result=execution_result,
             )
+        if task.task_type == "yandex_webmaster_recrawl":
+            execution_result = _persist_indexing_report_artifact(
+                session=session,
+                task=task,
+                execution_result=execution_result,
+            )
 
         session.execute(
             update(Task)
@@ -374,6 +392,12 @@ def execute_task(task_id: int) -> None:
                     )
                 if task is not None and task.task_type == "crawl_site":
                     execution_result = _persist_crawl_site_artifacts(
+                        session=session,
+                        task=task,
+                        execution_result=execution_result,
+                    )
+                if task is not None and task.task_type == "yandex_webmaster_recrawl":
+                    execution_result = _persist_indexing_report_artifact(
                         session=session,
                         task=task,
                         execution_result=execution_result,
@@ -427,7 +451,226 @@ def _execute_by_type(task_id: int, task_type: str, payload: JsonPayload | None) 
         return _execute_fetch_robots_task(payload)
     if task_type == "crawl_site":
         return _execute_crawl_site_task(task_id, payload)
+    if task_type == "yandex_webmaster_recrawl":
+        return _execute_yandex_webmaster_recrawl_task(task_id, payload)
     raise ValueError(f"Unsupported task_type: {task_type}")
+
+
+def _execute_yandex_webmaster_recrawl_task(task_id: int, payload: JsonPayload | None) -> _TaskExecutionResult:
+    """Send one project's file-backed URL queue to Yandex Webmaster recrawl."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("yandex_webmaster_recrawl payload must be an object.")
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, int):
+        raise ValueError("yandex_webmaster_recrawl payload must contain project_id.")
+
+    session = SessionFactory()
+    try:
+        project = ProjectRepository(session).get_by_id(project_id)
+        if project is None:
+            raise ValueError("Проект для переобхода не найден.")
+        project_name = project.project_name
+        host_id = project.yandex_webmaster_host
+    finally:
+        session.close()
+    if not host_id:
+        raise ValueError(f"В проекте «{project_name}» не заполнен хост Яндекс Вебмастера.")
+
+    project_slug = slugify(project_name)
+    queue_before = get_recrawl_queue_count(project_slug)
+    if queue_before == 0:
+        report_path = append_indexing_report(
+            project_name=project_name,
+            channel="yandexwebmaster",
+            action="recrawl",
+            page_count=0,
+            status="empty_queue",
+            error_text=None,
+        )
+        return _build_yandex_recrawl_result(
+            project_name=project_name,
+            submitted_pages=0,
+            remaining_pages=0,
+            indexing_status="empty_queue",
+            error_text=None,
+            report_path=report_path,
+        )
+
+    access_token = get_yandex_access_token()
+    user_id = _get_yandex_webmaster_user_id(access_token)
+    submitted_pages = 0
+    started_at = time.monotonic()
+    terminal_status = "completed"
+    error_text: str | None = None
+    while True:
+        if _is_task_cancellation_requested(task_id):
+            terminal_status = "cancelled"
+            break
+        entries = peek_recrawl_queue(project_slug, limit=1)
+        if not entries:
+            break
+        entry = entries[0]
+        response_status, response_text = _send_yandex_recrawl_url(
+            access_token=access_token,
+            user_id=user_id,
+            host_id=host_id,
+            url=entry.url,
+        )
+        if response_status == 202:
+            remove_recrawl_queue_entry(project_slug, entry.queue_id)
+            submitted_pages += 1
+            if submitted_pages % YANDEX_RECRAWL_PROGRESS_EVERY_URLS == 0:
+                _persist_yandex_recrawl_progress(
+                    task_id=task_id,
+                    project_name=project_name,
+                    submitted_pages=submitted_pages,
+                    remaining_pages=get_recrawl_queue_count(project_slug),
+                    elapsed_seconds=time.monotonic() - started_at,
+                )
+            continue
+        error_text = _short_api_error(response_status, response_text)
+        terminal_status = "quota_reached" if response_status == 429 else f"api_error_{response_status}"
+        break
+
+    remaining_pages = get_recrawl_queue_count(project_slug)
+    report_path = append_indexing_report(
+        project_name=project_name,
+        channel="yandexwebmaster",
+        action="recrawl",
+        page_count=submitted_pages,
+        status=terminal_status,
+        error_text=error_text,
+    )
+    log_event(
+        LOGGER,
+        "yandex_webmaster_recrawl_finished",
+        task_id=task_id,
+        project_id=project_id,
+        submitted_pages=submitted_pages,
+        remaining_pages=remaining_pages,
+        indexing_status=terminal_status,
+    )
+    return _build_yandex_recrawl_result(
+        project_name=project_name,
+        submitted_pages=submitted_pages,
+        remaining_pages=remaining_pages,
+        indexing_status=terminal_status,
+        error_text=error_text,
+        report_path=report_path,
+    )
+
+
+def _build_yandex_recrawl_result(
+    *,
+    project_name: str,
+    submitted_pages: int,
+    remaining_pages: int,
+    indexing_status: str,
+    error_text: str | None,
+    report_path,
+) -> _TaskExecutionResult:
+    """Build the common task payload for every recrawl terminal state."""
+
+    return _TaskExecutionResult(
+        result_payload={
+            "project_name": project_name,
+            "channel": "yandexwebmaster",
+            "action": "recrawl",
+            "submitted_pages": submitted_pages,
+            "remaining_pages": remaining_pages,
+            "indexing_status": indexing_status,
+            "indexing_error": error_text,
+        },
+        report_relative_path=str(report_path.relative_to(LocalFileStorage().root)),
+    )
+
+
+def _persist_yandex_recrawl_progress(
+    *,
+    task_id: int,
+    project_name: str,
+    submitted_pages: int,
+    remaining_pages: int,
+    elapsed_seconds: float,
+) -> None:
+    """Expose periodic recrawl progress without writing on every API request."""
+
+    pages_per_minute = round(submitted_pages * 60 / max(elapsed_seconds, 1), 1)
+    session = SessionFactory()
+    try:
+        session.execute(
+            update(Task)
+            .where(Task.id == task_id, Task.status == TaskStatus.RUNNING)
+            .values(
+                result_payload={
+                    "project_name": project_name,
+                    "channel": "yandexwebmaster",
+                    "action": "recrawl",
+                    "submitted_pages": submitted_pages,
+                    "remaining_pages": remaining_pages,
+                    "indexing_status": "running",
+                    "recrawl_pages_per_minute": pages_per_minute,
+                    "recrawl_checkpoint_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+
+def _get_yandex_webmaster_user_id(access_token: str) -> str:
+    """Fetch the current Yandex Webmaster user id for recrawl requests."""
+
+    request = Request(
+        "https://api.webmaster.yandex.net/v4/user",
+        headers={"Authorization": f"OAuth {access_token}"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        raise RuntimeError(f"Яндекс Вебмастер не вернул user_id: HTTP {error.code}.") from error
+    except (URLError, TimeoutError, socket.timeout) as error:
+        raise RuntimeError(f"Не удалось получить user_id Яндекс Вебмастера: {error}.") from error
+    user_id = payload.get("user_id") if isinstance(payload, dict) else None
+    if not isinstance(user_id, int | str):
+        raise RuntimeError("Яндекс Вебмастер не вернул user_id.")
+    return str(user_id)
+
+
+def _send_yandex_recrawl_url(*, access_token: str, user_id: str, host_id: str, url: str) -> tuple[int, str]:
+    """Submit one URL and return the raw API status without following retries."""
+
+    endpoint = f"https://api.webmaster.yandex.net/v4/user/{user_id}/hosts/{quote(host_id, safe='')}/recrawl/queue"
+    request = Request(
+        endpoint,
+        data=json.dumps({"url": url}).encode("utf-8"),
+        headers={"Authorization": f"OAuth {access_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            return response.status, response.read().decode("utf-8", errors="replace")
+    except HTTPError as error:
+        return error.code, error.read().decode("utf-8", errors="replace")
+    except (URLError, TimeoutError, socket.timeout) as error:
+        return 0, str(error)
+
+
+def _short_api_error(status_code: int, value: str) -> str:
+    """Keep report errors readable without turning the XLSX into a response dump."""
+
+    compact = " ".join(value.split())
+    if compact:
+        return compact[:500]
+    if status_code == 504:
+        return "HTTP 504: Яндекс Вебмастер временно не ответил."
+    if status_code == 0:
+        return "Не удалось установить соединение с Яндекс Вебмастером."
+    return f"HTTP {status_code}: Яндекс Вебмастер вернул пустой ответ."
 
 
 def _execute_demo_task(task_type: str) -> _TaskExecutionResult:
@@ -1525,6 +1768,14 @@ def _persist_fetch_sitemap_artifacts(
         "csv": csv_file.relative_path,
         "xlsx": xlsx_file.relative_path,
     }
+    task_payload = task.payload if isinstance(task.payload, dict) else {}
+    if task.project_id is not None and task_payload.get("replace_yandex_recrawl_queue"):
+        queued_count = replace_recrawl_urls(
+            project_slug,
+            [url for url, _status_code in execution_result.export_sitemap_rows],
+        )
+        result_payload["recrawl_queue_replaced"] = True
+        result_payload["recrawl_queue_url_count"] = queued_count
     return _TaskExecutionResult(
         result_payload=result_payload,
         export_urls=execution_result.export_urls,
@@ -1585,6 +1836,36 @@ def _persist_crawl_site_artifacts(
     return _TaskExecutionResult(
         result_payload=result_payload,
         export_csv_content=execution_result.export_csv_content,
+    )
+
+
+def _persist_indexing_report_artifact(
+    *,
+    session,
+    task: Task,
+    execution_result: _TaskExecutionResult,
+) -> _TaskExecutionResult:
+    """Expose the shared indexing report as a downloadable task result."""
+
+    if not execution_result.report_relative_path:
+        return execution_result
+    report_path = LocalFileStorage().root / execution_result.report_relative_path
+    if not report_path.exists():
+        return execution_result
+    _upsert_task_file(
+        session=session,
+        task_id=task.id,
+        file_name="indexing_report.xlsx",
+        file_path=execution_result.report_relative_path,
+        file_type="xlsx",
+        file_size=report_path.stat().st_size,
+    )
+    result_payload = dict(execution_result.result_payload)
+    result_payload["export_file"] = execution_result.report_relative_path
+    result_payload["export_files"] = {"xlsx": execution_result.report_relative_path}
+    return _TaskExecutionResult(
+        result_payload=result_payload,
+        report_relative_path=execution_result.report_relative_path,
     )
 
 

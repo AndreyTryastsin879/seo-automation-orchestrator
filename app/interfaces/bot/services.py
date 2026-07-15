@@ -14,6 +14,12 @@ from app.core.config import get_settings
 from app.core.db import SessionFactory
 from app.core.redis import get_redis_connection
 from app.core.storage import LocalFileStorage
+from app.core.slug import slugify
+from app.modules.indexing.yandex_webmaster import (
+    append_recrawl_urls,
+    get_recrawl_queue_count,
+    prepend_recrawl_urls,
+)
 from app.modules.bot_access.application import (
     BotAccessUserDTO,
     CreateBotAccessUserUseCase,
@@ -199,6 +205,34 @@ class ProjectRobotsLaunchResult:
     batch: TaskBatchDTO
     project: ProjectDTO
     task: TaskDTO
+
+
+@dataclass(slots=True, frozen=True)
+class YandexRecrawlProjectSummary:
+    """Project state displayed in the Yandex Webmaster recrawl list."""
+
+    project: ProjectDTO
+    queue_count: int
+    has_yandex_host: bool
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectYandexRecrawlLaunchResult:
+    """Result of starting recrawl for one project."""
+
+    batch: TaskBatchDTO
+    project: ProjectDTO
+    task: TaskDTO
+
+
+@dataclass(slots=True, frozen=True)
+class BulkYandexRecrawlLaunchResult:
+    """Result of starting recrawl queues for all eligible projects."""
+
+    batch: TaskBatchDTO | None
+    total_projects: int
+    skipped_projects: int
+    task_ids: list[int]
 
 
 @dataclass(slots=True, frozen=True)
@@ -484,6 +518,115 @@ def list_all_projects() -> list[ProjectDTO]:
         session.close()
 
 
+def list_yandex_recrawl_projects() -> list[YandexRecrawlProjectSummary]:
+    """Return all projects with their current Yandex recrawl queue state."""
+
+    summaries = []
+    for project in list_all_projects():
+        summaries.append(
+            YandexRecrawlProjectSummary(
+                project=project,
+                queue_count=get_recrawl_queue_count(slugify(project.project_name)),
+                has_yandex_host=bool(project.yandex_webmaster_host),
+            )
+        )
+    return summaries
+
+
+def add_yandex_recrawl_urls(project_id: int, urls: list[str], *, prepend: bool) -> tuple[ProjectDTO, int, int]:
+    """Insert URLs at the selected edge of one project queue."""
+
+    project = get_project(project_id)
+    if project is None:
+        raise ValueError("Проект не найден.")
+    project_slug = slugify(project.project_name)
+    added_count = (
+        prepend_recrawl_urls(project_slug, urls)
+        if prepend
+        else append_recrawl_urls(project_slug, urls)
+    )
+    return project, added_count, get_recrawl_queue_count(project_slug)
+
+
+def launch_project_yandex_recrawl(project_id: int) -> ProjectYandexRecrawlLaunchResult:
+    """Create one Yandex Webmaster recrawl task for a selected project."""
+
+    session = SessionFactory()
+    try:
+        project_repository = ProjectRepository(session)
+        project = project_repository.get_by_id(project_id)
+        if project is None:
+            raise ValueError("Проект не найден.")
+        if not project.yandex_webmaster_host:
+            raise ValueError(f"В проекте «{project.project_name}» не заполнен хост Яндекс Вебмастера.")
+        queue_count = get_recrawl_queue_count(slugify(project.project_name))
+        if queue_count == 0:
+            raise ValueError(f"В очереди проекта «{project.project_name}» нет URL.")
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.YANDEX_WEBMASTER_RECRAWL_PROJECT,
+            title=f"Переобход Яндекс Вебмастера: {project.project_name}",
+            payload={"project_ids": [project.id]},
+        )
+        task = _create_yandex_recrawl_task(
+            session=session,
+            batch_id=task_batch.id,
+            project_id=project.id,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+        )
+        project_dto = GetProjectUseCase(project_repository).execute(project.id)
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="yandex_webmaster_recrawl")
+        return ProjectYandexRecrawlLaunchResult(
+            batch=task_batch,
+            project=project_dto,
+            task=task,
+        )
+    finally:
+        session.close()
+
+
+def launch_all_projects_yandex_recrawl() -> BulkYandexRecrawlLaunchResult:
+    """Create sequential recrawl tasks for every project with a ready queue."""
+
+    session = SessionFactory()
+    try:
+        projects = ProjectRepository(session).list()
+        eligible_projects = [
+            project
+            for project in projects
+            if project.yandex_webmaster_host and get_recrawl_queue_count(slugify(project.project_name)) > 0
+        ]
+        if not eligible_projects:
+            return BulkYandexRecrawlLaunchResult(batch=None, total_projects=0, skipped_projects=len(projects), task_ids=[])
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.YANDEX_WEBMASTER_RECRAWL_ALL,
+            title="Переобход Яндекс Вебмастера: все проекты",
+            payload={"project_ids": [project.id for project in eligible_projects]},
+        )
+        task_ids: list[int] = []
+        for project in eligible_projects:
+            task = _create_yandex_recrawl_task(
+                session=session,
+                batch_id=task_batch.id,
+                project_id=project.id,
+                queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            )
+            task_ids.append(task.id)
+        session.commit()
+        for task_id in task_ids:
+            TaskQueue(queue_name=CRAWL_DEFAULT_QUEUE_NAME).enqueue(task_id, task_type="yandex_webmaster_recrawl")
+        return BulkYandexRecrawlLaunchResult(
+            batch=task_batch,
+            total_projects=len(eligible_projects),
+            skipped_projects=len(projects) - len(eligible_projects),
+            task_ids=task_ids,
+        )
+    finally:
+        session.close()
+
+
 def get_project(project_id: int) -> ProjectDTO | None:
     """Return one project by id for the bot."""
 
@@ -659,6 +802,7 @@ def launch_project_sitemap(
     project_id: int,
     *,
     resolve_status_codes: bool = DEFAULT_SITEMAP_RESOLVE_STATUS_CODES,
+    replace_yandex_recrawl_queue: bool = False,
 ) -> ProjectSitemapLaunchResult | None:
     """Create a sitemap parsing task for an existing project."""
 
@@ -679,6 +823,7 @@ def launch_project_sitemap(
                 "project_name": project.project_name,
                 "url": sitemap_url,
                 "resolve_status_codes": resolve_status_codes,
+                "replace_yandex_recrawl_queue": replace_yandex_recrawl_queue,
             },
         )
         task = _create_fetch_sitemap_task(
@@ -687,6 +832,7 @@ def launch_project_sitemap(
             project_id=project.id,
             sitemap_url=sitemap_url,
             resolve_status_codes=resolve_status_codes,
+            replace_yandex_recrawl_queue=replace_yandex_recrawl_queue,
             queue_name=CRAWL_DEFAULT_QUEUE_NAME,
         )
         session.commit()
@@ -809,6 +955,7 @@ def launch_all_projects_crawl(*, settings: CrawlLaunchSettings | None = None) ->
 def launch_all_projects_sitemap(
     *,
     resolve_status_codes: bool = DEFAULT_SITEMAP_RESOLVE_STATUS_CODES,
+    replace_yandex_recrawl_queue: bool = False,
 ) -> BulkProjectSitemapLaunchResult:
     """Create sitemap parsing tasks for all projects in default-then-heavy order."""
 
@@ -833,6 +980,7 @@ def launch_all_projects_sitemap(
             payload={
                 "project_ids": [project.id for project in eligible_projects],
                 "resolve_status_codes": resolve_status_codes,
+                "replace_yandex_recrawl_queue": replace_yandex_recrawl_queue,
             },
         )
 
@@ -846,6 +994,7 @@ def launch_all_projects_sitemap(
                 project_id=project.id,
                 sitemap_url=sitemap_url,
                 resolve_status_codes=resolve_status_codes,
+                replace_yandex_recrawl_queue=replace_yandex_recrawl_queue,
                 queue_name=CRAWL_DEFAULT_QUEUE_NAME,
             )
             task_ids.append(task.id)
@@ -990,7 +1139,7 @@ def cancel_active_crawl_tasks() -> CancelCrawlTasksResult:
 
 
 def cancel_task_batch(batch_id: int) -> CancelTaskBatchResult | None:
-    """Cancel pending and running crawl tasks only for a single batch."""
+    """Cancel every pending or running task belonging to one batch."""
 
     session = SessionFactory()
     try:
@@ -1002,8 +1151,8 @@ def cancel_task_batch(batch_id: int) -> CancelTaskBatchResult | None:
             return None
 
         tasks = task_repository.list_by_batch_id(batch_id)
-        pending_tasks = [task for task in tasks if task.task_type == "crawl_site" and task.status == TaskStatus.PENDING]
-        running_tasks = [task for task in tasks if task.task_type == "crawl_site" and task.status == TaskStatus.RUNNING]
+        pending_tasks = [task for task in tasks if task.status == TaskStatus.PENDING]
+        running_tasks = [task for task in tasks if task.status == TaskStatus.RUNNING]
 
         pending_task_ids = {task.id for task in pending_tasks}
         _delete_pending_jobs(pending_task_ids)
@@ -1023,7 +1172,9 @@ def cancel_task_batch(batch_id: int) -> CancelTaskBatchResult | None:
             task.cancel_requested = True
             task_repository.update(task)
             job_id = started_jobs_by_task_id.get(task.id)
-            if job_id is not None:
+            # Recrawl checks the flag between requests and then saves a report.
+            # Stopping its RQ workhorse would skip that cleanup and report write.
+            if job_id is not None and task.task_type != "yandex_webmaster_recrawl":
                 send_stop_job_command(get_redis_connection(), job_id)
             running_cancel_requested += 1
 
@@ -1131,6 +1282,28 @@ def _create_crawl_task(
     )
 
 
+def _create_yandex_recrawl_task(
+    *,
+    session,
+    batch_id: int | None,
+    project_id: int,
+    queue_name: str,
+) -> TaskDTO:
+    """Create a task that drains one project's Yandex recrawl XLSX queue."""
+
+    task_repository = TaskRepository(session)
+    create_task = CreateTaskUseCase(task_repository)
+    return create_task.execute(
+        CreateTaskCommand(
+            batch_id=batch_id,
+            project_id=project_id,
+            queue_name=queue_name,
+            task_type="yandex_webmaster_recrawl",
+            payload={"project_id": project_id},
+        )
+    )
+
+
 def _create_fetch_sitemap_task(
     *,
     session,
@@ -1139,6 +1312,7 @@ def _create_fetch_sitemap_task(
     sitemap_url: str,
     resolve_status_codes: bool,
     queue_name: str,
+    replace_yandex_recrawl_queue: bool = False,
 ) -> TaskDTO:
     """Create a fetch_sitemap task through the application layer."""
 
@@ -1153,6 +1327,7 @@ def _create_fetch_sitemap_task(
             payload={
                 "url": sitemap_url,
                 "resolve_status_codes": resolve_status_codes,
+                "replace_yandex_recrawl_queue": replace_yandex_recrawl_queue,
             },
         )
     )
