@@ -48,17 +48,24 @@ The project already includes:
 - site crawling with configurable depth, concurrency, page limits, and robots handling
 - separate crawl queues for standard and heavy websites
 - sitemap-oriented project setup
+- sitemap parsing from a saved project, a direct sitemap URL, or `robots.txt`
+- sitemap CSV and XLSX exports with optional HTTP status-code checks
+- optional transfer of project sitemap URLs into a Yandex Webmaster recrawl queue
+- Yandex Webmaster recrawl queues with a manually connected OAuth token
+- indexing report export and live recrawl progress in Telegram
 - launch tracking and task status reporting in Telegram
 - partial result checkpoints for long-running crawl tasks
 - CSV and XLSX export for crawl results
+- phone-based bot access control and root-admin management
+- structured application logs for bot, API, workers, and task lifecycle events
 
 ## Planned Capabilities
 
 The platform is intended to grow into a broader SEO automation system, including:
 
-- sitemap parsing and sitemap QA
-- interaction with the Yandex Webmaster API, including index status retrieval and URL submission
+- extended Yandex Webmaster workflows, including index status retrieval and URL removal
 - URL submission and removal flows through the Google Indexing API
+- IndexNow API integration
 - interaction with Google Search Console
 - technical audits based on collected crawl and indexing data
 - export pipelines for reporting data
@@ -113,6 +120,14 @@ At the moment, the crawler collects:
 - content type
 
 The data model can be extended without much difficulty, especially if you are using Codex to accelerate implementation.
+
+## Sitemap And Indexing
+
+Sitemap parsing is available from the Telegram bot for saved projects, a direct sitemap URL, and sitemap discovery through `robots.txt`. Results are exported as CSV and XLSX; server-response-code checks can be enabled when needed.
+
+For saved projects, sitemap URLs can optionally replace that project's Yandex Webmaster recrawl CSV queue. The bot supports adding URLs manually at the beginning or end of a queue, submitting queues project by project or for all ready projects, and downloading the aggregate `indexing_report.xlsx` report.
+
+The Yandex connection uses a manually issued OAuth token, encrypted in the application database. See [Yandex OAuth and recrawl setup](docs/yandex-oauth-and-recrawl.md).
 
 ## Why Telegram
 
@@ -195,6 +210,8 @@ Primary operator interface for:
 
 - launching crawl tasks
 - configuring standard and heavy crawl modes
+- parsing sitemap files and managing sitemap settings
+- managing Yandex Webmaster recrawl queues
 - checking task and launch status
 - managing projects
 

@@ -1,73 +1,74 @@
 # Roadmap
 
-This roadmap reflects the current intended direction of SEO Automation Orchestrator.
-
-The project is being built as a modular SEO operations platform, so each release is meant to add a practical workflow that can be used on its own and later combined with other modules.
+This roadmap reflects the current direction of SEO Automation Orchestrator. Each module should provide a usable workflow on its own and become a reusable source of data for later modules.
 
 ## Current Foundation
 
 Already implemented:
 
 - project management through API and Telegram bot
+- phone-based bot access control and root-admin tools
 - asynchronous task execution with Redis and RQ
-- standard and heavy crawl modes
-- launch tracking and task status reporting
-- partial crawl checkpoints
-- CSV and XLSX export for crawl results
-- production deployment stack for API, webhook bot, and workers
+- standard and heavy crawl modes with checkpoints and partial results
+- CSV and XLSX crawl exports, including relative-link diagnostics
+- sitemap parsing from projects, direct URLs, and `robots.txt`
+- sitemap CSV and XLSX exports with optional status-code checks
+- sitemap-to-Yandex-queue transfer for saved projects
+- Yandex Webmaster recrawl queues, cancellation, live progress, and aggregate XLSX reporting
+- encrypted storage for a manually issued shared Yandex OAuth token
+- structured logs and a production deployment stack for API, webhook bot, workers, Redis, PostgreSQL, and Caddy
 
 ## Next Release
 
-### Sitemap parsing in the interface
+### Google Indexing API
 
-The next release is focused on sitemap parsing exposed through the existing interface layer.
+The next release is focused on a policy-aware Google Indexing API workflow.
 
 Expected scope:
 
-- run sitemap parsing as an operator workflow
-- return results through the Telegram interface
-- support practical sitemap inspection and validation tasks
-- prepare sitemap data for later audit and indexing workflows
+- service-account connection and credential handling
+- URL submission and removal workflows allowed by Google's API policy
+- queue-based execution, status tracking, and XLSX reporting
+- clear interface messaging about the limited eligible content types
 
 ## Planned Module Sequence
 
-The current planned order of upcoming modules is:
+1. Google Indexing API integration
+2. IndexNow API integration
+3. Audit workflows based on collected data
+4. Yandex Metrica API integration
+5. Extended Yandex Webmaster and Google Search Console workflows
 
-1. Sitemap parsing in the interface
-2. Yandex Webmaster API integration
-3. Google Indexing API integration
-4. IndexNow API integration
-5. Audit workflows based on collected data
-6. Yandex Metrica API integration
+## Completed Modules
+
+### Sitemap Parsing
+
+Delivered:
+
+- parse sitemap files and sitemap indexes
+- launch sitemap workflows through Telegram
+- export URL sets as CSV and XLSX
+- prepare project sitemap URLs for Yandex recrawl queues
+
+### Yandex Webmaster Recrawl
+
+Delivered:
+
+- submit project URL queues for recrawl
+- preserve unsubmitted URLs after quota or API errors
+- provide live progress and aggregate XLSX reports
+- use an encrypted manually issued OAuth token
 
 ## Planned Capabilities By Module
 
-### 1. Sitemap parsing
+### 1. Google Indexing API
 
 Goals:
 
-- parse sitemap files and sitemap indexes
-- expose sitemap workflows through Telegram
-- prepare URL sets for audits and indexing operations
-- support sitemap QA and coverage checks
-
-### 2. Yandex Webmaster API
-
-Goals:
-
-- retrieve index-related data for pages
-- submit URLs when needed
-- use Yandex data later in audit workflows
-
-### 3. Google Indexing API
-
-Goals:
-
-- submit URLs for indexing
-- request URL removal when relevant
+- submit and remove URLs where the API policy allows it
 - support operational indexing workflows from the same platform
 
-### 4. IndexNow API
+### 2. IndexNow API
 
 Goals:
 
@@ -75,7 +76,7 @@ Goals:
 - reduce the need for separate one-off scripts
 - keep indexing workflows unified inside the platform
 
-### 5. Audit workflows
+### 3. Audit Workflows
 
 Goals:
 
@@ -83,7 +84,7 @@ Goals:
 - surface practical technical SEO issues
 - prepare reusable datasets for analysis and reporting
 
-### 6. Yandex Metrica API
+### 4. Yandex Metrica API
 
 Goals:
 
@@ -91,6 +92,14 @@ Goals:
 - connect performance metrics with crawl and indexing data
 - support later reporting and dashboard workflows
 
+### 5. Extended Webmaster And Search Console Workflows
+
+Goals:
+
+- retrieve index and coverage data for pages
+- support additional Yandex Webmaster operations, including removals
+- connect Google Search Console data to future audit workflows
+
 ## Direction
 
-The long-term direction of the project is to move from a crawler-centered foundation toward a broader operational SEO platform where crawl, sitemap, indexing, audit, and reporting workflows can be run from one system.
+The long-term direction is to move from a crawler-centered foundation toward a broader operational SEO platform where crawl, sitemap, indexing, audit, and reporting workflows run from one system.
