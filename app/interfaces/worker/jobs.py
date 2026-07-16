@@ -32,6 +32,14 @@ from app.modules.indexing.yandex_webmaster import (
     remove_recrawl_queue_entry,
     replace_recrawl_urls,
 )
+from app.modules.indexing.indexnow import (
+    get_indexnow_queue_count,
+    peek_indexnow_queue,
+    read_sitemap_export_urls,
+    remove_indexnow_queue_entries,
+    replace_indexnow_urls,
+)
+from app.modules.indexnow.service import get_indexnow_credential
 from app.modules.projects.infrastructure import ProjectRepository
 from app.modules.tasks.domain import JsonPayload
 from app.modules.tasks.domain.enums import TaskStatus
@@ -44,6 +52,10 @@ SITEMAP_ENTRY_LIMIT = 100
 SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS = 10
 SITEMAP_STATUS_CHECK_MAX_CONCURRENCY = 10
 YANDEX_RECRAWL_PROGRESS_EVERY_URLS = 10
+YANDEX_RECRAWL_REQUEST_ATTEMPTS = 3
+YANDEX_RECRAWL_RETRY_DELAYS_SECONDS = (2, 5)
+YANDEX_RECRAWL_RETRYABLE_STATUS_CODES = {0, 502, 503, 504}
+INDEXNOW_BATCH_SIZE = 10_000
 MAX_REDIRECTS = 10
 CRAWL_PROGRESS_CHECKPOINT_EVERY_PAGES = 50
 NON_HTML_EXTENSIONS = {
@@ -349,7 +361,7 @@ def execute_task(task_id: int) -> None:
                 task=task,
                 execution_result=execution_result,
             )
-        if task.task_type == "yandex_webmaster_recrawl":
+        if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
             execution_result = _persist_indexing_report_artifact(
                 session=session,
                 task=task,
@@ -396,7 +408,7 @@ def execute_task(task_id: int) -> None:
                         task=task,
                         execution_result=execution_result,
                     )
-                if task is not None and task.task_type == "yandex_webmaster_recrawl":
+                if task is not None and task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
                     execution_result = _persist_indexing_report_artifact(
                         session=session,
                         task=task,
@@ -453,7 +465,248 @@ def _execute_by_type(task_id: int, task_type: str, payload: JsonPayload | None) 
         return _execute_crawl_site_task(task_id, payload)
     if task_type == "yandex_webmaster_recrawl":
         return _execute_yandex_webmaster_recrawl_task(task_id, payload)
+    if task_type == "indexnow_submit":
+        return _execute_indexnow_submit_task(task_id, payload)
+    if task_type == "indexnow_sitemap_replace":
+        return _execute_indexnow_sitemap_replace_task(payload)
     raise ValueError(f"Unsupported task_type: {task_type}")
+
+
+def _execute_indexnow_sitemap_replace_task(payload: JsonPayload | None) -> _TaskExecutionResult:
+    """Replace one IndexNow queue from an already exported sitemap CSV."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("project_id"), int):
+        raise ValueError("indexnow_sitemap_replace payload must contain project_id.")
+    project_id = payload["project_id"]
+    session = SessionFactory()
+    try:
+        project = ProjectRepository(session).get_by_id(project_id)
+        if project is None:
+            raise ValueError("Проект для заполнения IndexNow не найден.")
+        project_name = project.project_name
+    finally:
+        session.close()
+    project_slug = slugify(project_name)
+    urls = read_sitemap_export_urls(project_slug)
+    if urls is None:
+        raise ValueError(f"Не найден CSV sitemap для проекта «{project_name}».")
+    queue_count = replace_indexnow_urls(project_slug, urls)
+    return _TaskExecutionResult(
+        result_payload={
+            "project_name": project_name,
+            "indexnow_queue_replaced": True,
+            "indexnow_queue_url_count": queue_count,
+        }
+    )
+
+
+def _execute_indexnow_submit_task(task_id: int, payload: JsonPayload | None) -> _TaskExecutionResult:
+    """Send one project queue to IndexNow in protocol-sized batches."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("indexnow_submit payload must be an object.")
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, int):
+        raise ValueError("indexnow_submit payload must contain project_id.")
+
+    session = SessionFactory()
+    try:
+        project = ProjectRepository(session).get_by_id(project_id)
+        if project is None:
+            raise ValueError("Проект для IndexNow не найден.")
+        project_name = project.project_name
+        start_url = project.start_url
+    finally:
+        session.close()
+    if not start_url:
+        raise ValueError(f"В проекте «{project_name}» не заполнен стартовый URL.")
+    host = urlsplit(start_url).netloc.lower()
+    if not host:
+        raise ValueError(f"В проекте «{project_name}» указан некорректный стартовый URL.")
+    credential = get_indexnow_credential(project_id)
+    if credential is None:
+        raise ValueError(f"Для проекта «{project_name}» не настроен ключ IndexNow.")
+
+    project_slug = slugify(project_name)
+    queue_before = get_indexnow_queue_count(project_slug)
+    if queue_before == 0:
+        report_path = append_indexing_report(
+            project_name=project_name,
+            channel="indexnow",
+            action="submit",
+            page_count=0,
+            status="empty_queue",
+            error_text=None,
+        )
+        return _build_indexnow_result(
+            project_name=project_name,
+            submitted_pages=0,
+            remaining_pages=0,
+            indexing_status="empty_queue",
+            error_text=None,
+            report_path=report_path,
+        )
+
+    submitted_pages = 0
+    terminal_status = "completed"
+    error_text: str | None = None
+    while True:
+        if _is_task_cancellation_requested(task_id):
+            terminal_status = "cancelled"
+            break
+        entries = peek_indexnow_queue(project_slug, limit=INDEXNOW_BATCH_SIZE)
+        if not entries:
+            break
+        invalid_url = next((entry.url for entry in entries if urlsplit(entry.url).netloc.lower() != host), None)
+        if invalid_url is not None:
+            terminal_status = "invalid_host"
+            error_text = f"URL не относится к хосту {host}: {invalid_url}"
+            break
+        response_status, response_text = _send_indexnow_urls(
+            host=host,
+            key=credential.key,
+            key_location=credential.key_location,
+            urls=[entry.url for entry in entries],
+        )
+        if response_status in {200, 202}:
+            removed_count = remove_indexnow_queue_entries(project_slug, {entry.queue_id for entry in entries})
+            submitted_pages += removed_count
+            _persist_indexnow_progress(
+                task_id=task_id,
+                project_name=project_name,
+                submitted_pages=submitted_pages,
+                remaining_pages=get_indexnow_queue_count(project_slug),
+            )
+            continue
+        error_text = _short_indexnow_error(response_status, response_text)
+        if response_status == 429:
+            terminal_status = "rate_limited"
+        elif response_status == 0:
+            terminal_status = "connection_error"
+        else:
+            terminal_status = f"api_error_{response_status}"
+        break
+
+    remaining_pages = get_indexnow_queue_count(project_slug)
+    report_path = append_indexing_report(
+        project_name=project_name,
+        channel="indexnow",
+        action="submit",
+        page_count=submitted_pages,
+        status=terminal_status,
+        error_text=error_text,
+    )
+    log_event(
+        LOGGER,
+        "indexnow_submit_finished",
+        task_id=task_id,
+        project_id=project_id,
+        submitted_pages=submitted_pages,
+        remaining_pages=remaining_pages,
+        indexing_status=terminal_status,
+    )
+    return _build_indexnow_result(
+        project_name=project_name,
+        submitted_pages=submitted_pages,
+        remaining_pages=remaining_pages,
+        indexing_status=terminal_status,
+        error_text=error_text,
+        report_path=report_path,
+    )
+
+
+def _build_indexnow_result(
+    *,
+    project_name: str,
+    submitted_pages: int,
+    remaining_pages: int,
+    indexing_status: str,
+    error_text: str | None,
+    report_path,
+) -> _TaskExecutionResult:
+    """Build the result shown in the task card after IndexNow submission."""
+
+    return _TaskExecutionResult(
+        result_payload={
+            "project_name": project_name,
+            "channel": "indexnow",
+            "action": "submit",
+            "submitted_pages": submitted_pages,
+            "remaining_pages": remaining_pages,
+            "indexing_status": indexing_status,
+            "indexing_error": error_text,
+        },
+        report_relative_path=str(report_path.relative_to(LocalFileStorage().root)),
+    )
+
+
+def _persist_indexnow_progress(
+    *,
+    task_id: int,
+    project_name: str,
+    submitted_pages: int,
+    remaining_pages: int,
+) -> None:
+    """Expose batch-level progress while large queues are being submitted."""
+
+    session = SessionFactory()
+    try:
+        session.execute(
+            update(Task)
+            .where(Task.id == task_id, Task.status == TaskStatus.RUNNING)
+            .values(
+                result_payload={
+                    "project_name": project_name,
+                    "channel": "indexnow",
+                    "action": "submit",
+                    "submitted_pages": submitted_pages,
+                    "remaining_pages": remaining_pages,
+                    "indexing_status": "running",
+                    "indexnow_checkpoint_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+
+def _send_indexnow_urls(*, host: str, key: str, key_location: str | None, urls: list[str]) -> tuple[int, str]:
+    """Submit up to 10,000 URLs to Yandex's IndexNow endpoint."""
+
+    payload: dict[str, object] = {"host": host, "key": key, "urlList": urls}
+    if key_location:
+        payload["keyLocation"] = key_location
+    request = Request(
+        "https://yandex.com/indexnow",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json; charset=utf-8", "User-Agent": "SEO-Automation-Orchestrator/1.0"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            return response.status, response.read().decode("utf-8", errors="replace")
+    except HTTPError as error:
+        return error.code, error.read().decode("utf-8", errors="replace")
+    except (URLError, TimeoutError, socket.timeout) as error:
+        return 0, str(error)
+
+
+def _short_indexnow_error(status_code: int, value: str) -> str:
+    """Keep IndexNow errors useful in Telegram and the aggregate report."""
+
+    compact = " ".join(value.split())
+    if compact:
+        return compact[:500]
+    if status_code == 0:
+        return "Не удалось подключиться к API IndexNow."
+    if status_code == 403:
+        return "Ключ IndexNow не подтверждён: проверь ключевой .txt файл на сайте."
+    if status_code == 422:
+        return "В пакете есть URL другого хоста или ключ не подходит для этого пути."
+    if status_code == 429:
+        return "IndexNow временно ограничил количество запросов."
+    return f"HTTP {status_code}: IndexNow вернул пустой ответ."
 
 
 def _execute_yandex_webmaster_recrawl_task(task_id: int, payload: JsonPayload | None) -> _TaskExecutionResult:
@@ -511,7 +764,8 @@ def _execute_yandex_webmaster_recrawl_task(task_id: int, payload: JsonPayload | 
         if not entries:
             break
         entry = entries[0]
-        response_status, response_text = _send_yandex_recrawl_url(
+        response_status, response_text = _send_yandex_recrawl_url_with_retry(
+            task_id=task_id,
             access_token=access_token,
             user_id=user_id,
             host_id=host_id,
@@ -530,7 +784,12 @@ def _execute_yandex_webmaster_recrawl_task(task_id: int, payload: JsonPayload | 
                 )
             continue
         error_text = _short_api_error(response_status, response_text)
-        terminal_status = "quota_reached" if response_status == 429 else f"api_error_{response_status}"
+        if response_status == 429:
+            terminal_status = "quota_reached"
+        elif response_status == 0:
+            terminal_status = "connection_error"
+        else:
+            terminal_status = f"api_error_{response_status}"
         break
 
     remaining_pages = get_recrawl_queue_count(project_slug)
@@ -660,16 +919,53 @@ def _send_yandex_recrawl_url(*, access_token: str, user_id: str, host_id: str, u
         return 0, str(error)
 
 
+def _send_yandex_recrawl_url_with_retry(
+    *,
+    task_id: int,
+    access_token: str,
+    user_id: str,
+    host_id: str,
+    url: str,
+) -> tuple[int, str]:
+    """Retry temporary Yandex API and TLS failures without dropping the queued URL."""
+
+    for attempt in range(1, YANDEX_RECRAWL_REQUEST_ATTEMPTS + 1):
+        response_status, response_text = _send_yandex_recrawl_url(
+            access_token=access_token,
+            user_id=user_id,
+            host_id=host_id,
+            url=url,
+        )
+        if response_status not in YANDEX_RECRAWL_RETRYABLE_STATUS_CODES:
+            return response_status, response_text
+        if attempt == YANDEX_RECRAWL_REQUEST_ATTEMPTS:
+            return response_status, response_text
+        delay_seconds = YANDEX_RECRAWL_RETRY_DELAYS_SECONDS[attempt - 1]
+        log_event(
+            LOGGER,
+            "yandex_webmaster_recrawl_retry",
+            level=30,
+            task_id=task_id,
+            attempt=attempt,
+            response_status=response_status,
+            delay_seconds=delay_seconds,
+        )
+        time.sleep(delay_seconds)
+
+    raise AssertionError("Yandex recrawl retry loop ended unexpectedly.")
+
+
 def _short_api_error(status_code: int, value: str) -> str:
     """Keep report errors readable without turning the XLSX into a response dump."""
 
     compact = " ".join(value.split())
+    if status_code == 0:
+        detail = compact or "соединение было закрыто до HTTP-ответа"
+        return f"Не удалось подключиться к API Яндекс Вебмастера: {detail}"
     if compact:
         return compact[:500]
     if status_code == 504:
         return "HTTP 504: Яндекс Вебмастер временно не ответил."
-    if status_code == 0:
-        return "Не удалось установить соединение с Яндекс Вебмастером."
     return f"HTTP {status_code}: Яндекс Вебмастер вернул пустой ответ."
 
 

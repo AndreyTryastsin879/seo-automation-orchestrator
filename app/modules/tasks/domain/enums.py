@@ -14,6 +14,10 @@ class TaskBatchType(StrEnum):
     SITEMAP_ADHOC = "sitemap_adhoc"
     YANDEX_WEBMASTER_RECRAWL_PROJECT = "yandex_webmaster_recrawl_project"
     YANDEX_WEBMASTER_RECRAWL_ALL = "yandex_webmaster_recrawl_all"
+    INDEXNOW_SUBMIT_PROJECT = "indexnow_submit_project"
+    INDEXNOW_SUBMIT_ALL = "indexnow_submit_all"
+    INDEXNOW_SITEMAP_REPLACE_PROJECT = "indexnow_sitemap_replace_project"
+    INDEXNOW_SITEMAP_REPLACE_ALL = "indexnow_sitemap_replace_all"
 
 
 class TaskBatchStatus(StrEnum):

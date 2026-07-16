@@ -13,6 +13,8 @@ This file records notable user-facing and architectural progress in SEO Automati
 - Sitemap-to-Yandex-queue transfer for saved projects.
 - Yandex Webmaster recrawl queues stored as CSV, manual queue insertion, 24-hour task timeout, cancellation, and live progress.
 - Encrypted manually issued Yandex OAuth token storage and aggregate `indexing_report.xlsx` exports.
+- IndexNow project queues with encrypted keys, 10,000-URL batches, cancellation, and aggregate XLSX reporting.
+- One-time replacement of IndexNow queues from completed project sitemap CSV exports.
 - Local and production deployment configuration for the API, Telegram bot, Redis, PostgreSQL, workers, and Caddy.
 
 ### Changed

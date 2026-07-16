@@ -5,7 +5,7 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.interfaces.bot.services import RecentBatchSummary, RecentTaskSummary, YandexRecrawlProjectSummary
+from app.interfaces.bot.services import IndexNowProjectSummary, IndexNowSitemapProjectSummary, RecentBatchSummary, RecentTaskSummary, YandexRecrawlProjectSummary
 from app.interfaces.bot.services import CrawlLaunchSettings
 from app.modules.bot_access.application import BotAccessUserDTO
 from app.modules.projects.application import ProjectDTO
@@ -105,6 +105,7 @@ def build_indexing_actions_keyboard() -> InlineKeyboardMarkup:
 
     builder = InlineKeyboardBuilder()
     builder.button(text="Яндекс Вебмастер", callback_data="indexing:yandex")
+    builder.button(text="IndexNow", callback_data="indexing:indexnow")
     builder.button(text="Подключение Яндекс", callback_data="indexing:yandex:connection")
     builder.adjust(1)
     return builder.as_markup()
@@ -115,6 +116,91 @@ def build_yandex_webmaster_actions_keyboard() -> InlineKeyboardMarkup:
 
     builder = InlineKeyboardBuilder()
     builder.button(text="Отправить на переобход", callback_data="indexing:yandex:recrawl")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_indexnow_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build available IndexNow actions."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Отправить URL", callback_data="indexing:indexnow:submit")
+    builder.button(text="Заполнить очереди из sitemap", callback_data="indexing:indexnow:sitemap")
+    builder.button(text="Настроить ключ", callback_data="indexing:indexnow:settings")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_indexnow_sitemap_projects_keyboard(projects: list[IndexNowSitemapProjectSummary]) -> InlineKeyboardMarkup:
+    """List sitemap exports that can replace IndexNow queues."""
+
+    builder = InlineKeyboardBuilder()
+    for summary in projects:
+        state = "sitemap готов" if summary.has_sitemap_export else "нет sitemap CSV"
+        builder.button(
+            text=f"{summary.project.project_name} · {state}",
+            callback_data=f"indexing:indexnow:sitemap:project:{summary.project.id}",
+        )
+    builder.button(text="Заполнить все очереди", callback_data="indexing:indexnow:sitemap:all")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_indexnow_sitemap_replace_confirm_keyboard(project_ids: list[int]) -> InlineKeyboardMarkup:
+    """Confirm destructive replacement of one or more IndexNow queues."""
+
+    target = "all" if len(project_ids) != 1 else str(project_ids[0])
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Заменить очередь", callback_data=f"indexing:indexnow:sitemap:confirm:{target}")
+    builder.button(text="Отмена", callback_data="indexing:indexnow:sitemap:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_indexnow_projects_keyboard(projects: list[IndexNowProjectSummary], *, mode: str) -> InlineKeyboardMarkup:
+    """Build IndexNow project selection for submission or key configuration."""
+
+    builder = InlineKeyboardBuilder()
+    for summary in projects:
+        key_state = "ключ OK" if summary.has_key else "нет ключа"
+        builder.button(
+            text=f"{summary.project.project_name} · {summary.queue_count} URL · {key_state}",
+            callback_data=f"indexing:indexnow:{mode}:project:{summary.project.id}",
+        )
+    if mode == "submit":
+        builder.button(text="Отправить все", callback_data="indexing:indexnow:submit:all")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_indexnow_key_mode_keyboard(project_id: int) -> InlineKeyboardMarkup:
+    """Let a root admin generate a key or enter an existing one."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Создать новый ключ", callback_data=f"indexing:indexnow:key:create:{project_id}")
+    builder.button(text="Ввести существующий ключ", callback_data=f"indexing:indexnow:key:enter:{project_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_indexnow_project_keyboard(project_id: int, *, queue_count: int) -> InlineKeyboardMarkup:
+    """Build submission and queue-insertion actions for one IndexNow project."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Отправить сейчас ({queue_count})", callback_data=f"indexing:indexnow:send:{project_id}")
+    builder.button(text="Добавить URL в начало", callback_data=f"indexing:indexnow:add:first:{project_id}")
+    builder.button(text="Добавить URL в конец", callback_data=f"indexing:indexnow:add:last:{project_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_indexnow_collect_keyboard(*, url_count: int) -> InlineKeyboardMarkup:
+    """Build controls for a multi-message IndexNow URL buffer."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Добавить в очередь ({url_count})", callback_data="indexing:indexnow:add:save")
+    builder.button(text="Очистить список", callback_data="indexing:indexnow:add:reset")
+    builder.button(text="Отмена", callback_data="indexing:indexnow:add:cancel")
     builder.adjust(1)
     return builder.as_markup()
 

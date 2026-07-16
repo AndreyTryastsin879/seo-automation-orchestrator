@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import io
+import secrets
+from urllib.parse import urlsplit
 
 from aiogram import Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, FSInputFile, Message
 
 from app.modules.projects.domain import CrawlSegment
 from app.interfaces.bot.access import is_root_admin_user
@@ -26,6 +28,13 @@ from app.interfaces.bot.keyboards import (
     build_heavy_setting_values_keyboard,
     build_heavy_settings_menu_keyboard,
     build_indexing_actions_keyboard,
+    build_indexnow_actions_keyboard,
+    build_indexnow_collect_keyboard,
+    build_indexnow_key_mode_keyboard,
+    build_indexnow_project_keyboard,
+    build_indexnow_projects_keyboard,
+    build_indexnow_sitemap_projects_keyboard,
+    build_indexnow_sitemap_replace_confirm_keyboard,
     build_main_menu_keyboard,
     build_parsing_actions_keyboard,
     build_parsing_settings_keyboard,
@@ -55,6 +64,7 @@ from app.interfaces.bot.keyboards import (
 )
 from app.interfaces.bot.services import (
     add_allowed_bot_user,
+    add_indexnow_urls,
     add_yandex_recrawl_urls,
     launch_ad_hoc_robots,
     launch_ad_hoc_sitemap,
@@ -73,7 +83,10 @@ from app.interfaces.bot.services import (
     get_batch_status,
     get_task_status,
     launch_all_projects_yandex_recrawl,
+    launch_all_projects_indexnow,
+    launch_indexnow_sitemap_replace,
     launch_project_yandex_recrawl,
+    launch_project_indexnow,
     launch_all_projects_crawl,
     launch_project_crawl,
     launch_project_robots,
@@ -81,11 +94,14 @@ from app.interfaces.bot.services import (
     launch_ad_hoc_crawl,
     list_all_projects,
     list_yandex_recrawl_projects,
+    list_indexnow_projects,
+    list_indexnow_sitemap_projects,
     list_recent_batches,
     list_projects,
     remove_allowed_bot_user,
     update_project,
 )
+from app.modules.indexnow.service import save_indexnow_credential
 from app.modules.yandex_oauth.service import get_yandex_connection_status, save_yandex_access_token
 
 router = Router(name="main_bot")
@@ -97,6 +113,11 @@ ADHOC_URL_LIST_BUFFER_STATE_KEY = "adhoc_url_list_buffer"
 YANDEX_RECRAWL_URL_BUFFER_STATE_KEY = "yandex_recrawl_url_buffer"
 YANDEX_RECRAWL_PROJECT_ID_STATE_KEY = "yandex_recrawl_project_id"
 YANDEX_RECRAWL_POSITION_STATE_KEY = "yandex_recrawl_position"
+INDEXNOW_URL_BUFFER_STATE_KEY = "indexnow_url_buffer"
+INDEXNOW_PROJECT_ID_STATE_KEY = "indexnow_project_id"
+INDEXNOW_POSITION_STATE_KEY = "indexnow_position"
+INDEXNOW_KEY_STATE_KEY = "indexnow_key"
+INDEXNOW_KEY_PROJECT_ID_STATE_KEY = "indexnow_key_project_id"
 HEAVY_CONCURRENCY_OPTIONS = (1, 2, 3, 4, 5)
 HEAVY_PAGE_OPTIONS = (5000, 25000, 100000, 150000, 200000, 250000)
 HEAVY_DELAY_OPTIONS = (250, 500, 1000, 2000, 5000)
@@ -122,6 +143,19 @@ class YandexRecrawlUrlListStates(StatesGroup):
     """FSM states for adding URLs to a Yandex recrawl queue."""
 
     waiting_for_urls = State()
+
+
+class IndexNowUrlListStates(StatesGroup):
+    """FSM states for adding URLs to an IndexNow queue."""
+
+    waiting_for_urls = State()
+
+
+class IndexNowKeyStates(StatesGroup):
+    """FSM states for receiving an IndexNow key and its verification URL."""
+
+    waiting_for_key = State()
+    waiting_for_key_location = State()
 
 
 class YandexAccessTokenStates(StatesGroup):
@@ -485,6 +519,372 @@ async def handle_yandex_indexing_menu(callback: CallbackQuery, state: FSMContext
     await callback.message.answer(
         "Яндекс Вебмастер.\nВыбери действие.",
         reply_markup=build_yandex_webmaster_actions_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow")
+async def handle_indexnow_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Open IndexNow actions."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        "IndexNow.\n\n"
+        "Отправляет URL в Яндекс и другие подключенные поисковые системы. "
+        "Для каждого сайта нужен ключевой `.txt` файл, размещённый на самом сайте.",
+        reply_markup=build_indexnow_actions_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:submit")
+async def handle_indexnow_submit_projects(callback: CallbackQuery, state: FSMContext) -> None:
+    """List projects for IndexNow submission."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    projects = list_indexnow_projects()
+    if not projects:
+        await callback.message.answer("Список проектов пока пуст.")
+        return
+    await callback.message.answer(
+        "Выбери проект.\n\n"
+        "В строке показано число URL в очереди и наличие ключа IndexNow.",
+        reply_markup=build_indexnow_projects_keyboard(projects, mode="submit"),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:sitemap")
+async def handle_indexnow_sitemap_projects(callback: CallbackQuery, state: FSMContext) -> None:
+    """List sitemap CSV exports available for one-time full queue replacement."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    projects = list_indexnow_sitemap_projects()
+    if not projects:
+        await callback.message.answer("Список проектов пока пуст.")
+        return
+    await callback.message.answer(
+        "Полное заполнение очереди из sitemap.\n\n"
+        "Будет взят готовый CSV из `storage/sitemap_parsing` и полностью заменит текущую очередь IndexNow проекта. "
+        "Ручные URL в этой очереди будут удалены.",
+        reply_markup=build_indexnow_sitemap_projects_keyboard(projects),
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:indexnow:sitemap:project:"))
+async def handle_indexnow_sitemap_project_confirm(callback: CallbackQuery) -> None:
+    """Ask for confirmation before replacing one queue from its sitemap export."""
+
+    await callback.answer()
+    try:
+        project_id = int(callback.data.rsplit(":", 1)[-1])
+    except ValueError:
+        await callback.message.answer("Не удалось определить проект.")
+        return
+    summary = next((item for item in list_indexnow_sitemap_projects() if item.project.id == project_id), None)
+    if summary is None:
+        await callback.message.answer("Проект не найден.")
+        return
+    if not summary.has_sitemap_export:
+        await callback.message.answer("Для этого проекта ещё нет CSV результата парсинга sitemap.")
+        return
+    await callback.message.answer(
+        f"Заменить очередь IndexNow проекта «{summary.project.project_name}» полным последним sitemap?\n\n"
+        "Текущие URL в очереди будут удалены.",
+        reply_markup=build_indexnow_sitemap_replace_confirm_keyboard([project_id]),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:sitemap:all")
+async def handle_indexnow_sitemap_all_confirm(callback: CallbackQuery) -> None:
+    """Ask for confirmation before replacing all queues with ready sitemap exports."""
+
+    await callback.answer()
+    ready_count = sum(item.has_sitemap_export for item in list_indexnow_sitemap_projects())
+    if ready_count == 0:
+        await callback.message.answer("Нет готовых CSV результатов парсинга sitemap.")
+        return
+    await callback.message.answer(
+        f"Заменить очереди IndexNow полными sitemap для {ready_count} проектов?\n\n"
+        "Текущие URL в этих очередях будут удалены.",
+        reply_markup=build_indexnow_sitemap_replace_confirm_keyboard([0, 1]),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:sitemap:cancel")
+async def handle_indexnow_sitemap_cancel(callback: CallbackQuery) -> None:
+    """Cancel a pending full sitemap queue replacement."""
+
+    await callback.answer()
+    await callback.message.answer("Полное заполнение очередей отменено.")
+
+
+@router.callback_query(F.data.startswith("indexing:indexnow:sitemap:confirm:"))
+async def handle_indexnow_sitemap_replace(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch worker tasks that replace IndexNow queues from sitemap CSV exports."""
+
+    await callback.answer()
+    target = callback.data.rsplit(":", 1)[-1]
+    if target == "all":
+        project_ids = [item.project.id for item in list_indexnow_sitemap_projects() if item.has_sitemap_export]
+    else:
+        try:
+            project_ids = [int(target)]
+        except ValueError:
+            await callback.message.answer("Не удалось определить проект.")
+            return
+    await _clear_flow_state_preserving_settings(state)
+    try:
+        result = launch_indexnow_sitemap_replace(project_ids)
+    except Exception:
+        await callback.message.answer("Не удалось запустить заполнение очередей из sitemap.")
+        return
+    if result.batch is None:
+        await callback.message.answer("Не найдено готовых CSV результатов парсинга sitemap.")
+        return
+    await callback.message.answer(
+        "Заполнение очередей IndexNow запущено.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проектов: {result.total_projects}\n"
+        f"Пропущено: {result.skipped_projects}\n\n"
+        "Статус будет доступен в разделе «Статус»."
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:settings")
+async def handle_indexnow_settings_projects(callback: CallbackQuery, state: FSMContext) -> None:
+    """List projects whose IndexNow keys can be set by the root admin."""
+
+    await callback.answer()
+    user = callback.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await callback.message.answer("Настраивать ключи IndexNow может только root-админ.")
+        return
+    await _clear_flow_state_preserving_settings(state)
+    projects = list_indexnow_projects()
+    if not projects:
+        await callback.message.answer("Список проектов пока пуст.")
+        return
+    await callback.message.answer(
+        "Выбери проект для настройки ключа IndexNow.",
+        reply_markup=build_indexnow_projects_keyboard(projects, mode="settings"),
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:indexnow:settings:project:"))
+async def handle_indexnow_key_project(callback: CallbackQuery, state: FSMContext) -> None:
+    """Offer creation or manual entry for a selected project's key."""
+
+    await callback.answer()
+    user = callback.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await callback.message.answer("Настраивать ключи IndexNow может только root-админ.")
+        return
+    try:
+        project_id = int(callback.data.rsplit(":", 1)[-1])
+    except ValueError:
+        await callback.message.answer("Не удалось определить проект.")
+        return
+    project = get_project(project_id)
+    if project is None:
+        await callback.message.answer("Проект не найден.")
+        return
+    await callback.message.answer(
+        f"Проект: {project.project_name}\n\n"
+        "Выбери способ настройки ключа IndexNow.",
+        reply_markup=build_indexnow_key_mode_keyboard(project_id),
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:indexnow:key:"))
+async def handle_indexnow_key_action(callback: CallbackQuery, state: FSMContext) -> None:
+    """Create a standard key file or start manual key entry for a project."""
+
+    await callback.answer()
+    user = callback.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await callback.message.answer("Настраивать ключи IndexNow может только root-админ.")
+        return
+    parts = callback.data.split(":")
+    if len(parts) != 5:
+        await callback.message.answer("Не удалось определить действие с ключом.")
+        return
+    action = parts[3]
+    try:
+        project_id = int(parts[4])
+    except ValueError:
+        await callback.message.answer("Не удалось определить проект.")
+        return
+    project = get_project(project_id)
+    if project is None:
+        await callback.message.answer("Проект не найден.")
+        return
+    if not project.start_url or not urlsplit(project.start_url).netloc:
+        await callback.message.answer("Для создания ключа заполни в проекте корректный стартовый URL.")
+        return
+    if action == "enter":
+        await _clear_flow_state_preserving_settings(state)
+        await state.set_state(IndexNowKeyStates.waiting_for_key)
+        await state.update_data({INDEXNOW_KEY_PROJECT_ID_STATE_KEY: project_id})
+        await callback.message.answer(
+            f"Проект: {project.project_name}\n\n"
+            "Пришли существующий ключ IndexNow одним сообщением. Бот сохранит его в зашифрованном виде.\n\n"
+            "Ключевой `.txt` файл с тем же ключом должен быть уже размещён на сайте.\n"
+            "Для отмены отправь /cancel."
+        )
+        return
+    if action != "create":
+        await callback.message.answer("Неизвестное действие с ключом.")
+        return
+    key = secrets.token_hex(32)
+    try:
+        save_indexnow_credential(project_id=project_id, key=key, key_location=None)
+    except (RuntimeError, ValueError) as error:
+        await callback.message.answer(f"Не удалось создать ключ: {error}")
+        return
+    key_file_name = f"{key}.txt"
+    parsed_start_url = urlsplit(project.start_url or "")
+    expected_url = f"{parsed_start_url.scheme}://{parsed_start_url.netloc}/{key_file_name}"
+    await callback.message.answer_document(
+        BufferedInputFile(key.encode("utf-8"), filename=key_file_name),
+        caption=(
+            f"Ключ IndexNow для проекта «{project.project_name}» создан.\n\n"
+            "Загрузи этот файл в корень сайта без изменения имени и содержимого.\n"
+            f"Ожидаемый адрес: {expected_url}\n\n"
+            "После этого можно добавлять URL в очередь и запускать отправку."
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:indexnow:submit:project:"))
+async def handle_indexnow_project(callback: CallbackQuery) -> None:
+    """Show submission and queue controls for one IndexNow project."""
+
+    await callback.answer()
+    try:
+        project_id = int(callback.data.rsplit(":", 1)[-1])
+    except ValueError:
+        await callback.message.answer("Не удалось определить проект.")
+        return
+    summary = next((item for item in list_indexnow_projects() if item.project.id == project_id), None)
+    if summary is None:
+        await callback.message.answer("Проект не найден.")
+        return
+    key_text = "настроен" if summary.has_key else "не настроен"
+    await callback.message.answer(
+        f"Проект: {summary.project.project_name}\n"
+        f"URL в очереди: {summary.queue_count}\n"
+        f"Ключ IndexNow: {key_text}",
+        reply_markup=build_indexnow_project_keyboard(project_id, queue_count=summary.queue_count),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:submit:all")
+async def handle_indexnow_submit_all(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch all ready IndexNow queues."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    try:
+        result = launch_all_projects_indexnow()
+    except Exception:
+        await callback.message.answer("Не удалось запустить отправку IndexNow для всех проектов.")
+        return
+    if result.batch is None:
+        await callback.message.answer("Нет проектов с URL в очереди, стартовым URL и настроенным ключом IndexNow.")
+        return
+    await callback.message.answer(
+        "Отправка IndexNow запущена.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проектов в запуске: {result.total_projects}\n"
+        f"Пропущено: {result.skipped_projects}\n\n"
+        "Проекты будут обработаны по очереди."
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:indexnow:send:"))
+async def handle_indexnow_submit_project(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch IndexNow submission for one project."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    try:
+        project_id = int(callback.data.rsplit(":", 1)[-1])
+        result = launch_project_indexnow(project_id)
+    except ValueError as exc:
+        await callback.message.answer(str(exc))
+        return
+    except Exception:
+        await callback.message.answer("Не удалось запустить отправку IndexNow.")
+        return
+    await callback.message.answer(
+        "Отправка IndexNow запущена.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проект: {result.project.project_name}\n"
+        f"Task ID: {result.task.id}\n\n"
+        "Статус и обновлённый отчет будут доступны в разделе «Статус»."
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:indexnow:add:"))
+async def handle_indexnow_add_action(callback: CallbackQuery, state: FSMContext) -> None:
+    """Collect and save a multi-message URL list for an IndexNow queue."""
+
+    await callback.answer()
+    action = callback.data.split(":")[3]
+    if action in {"first", "last"}:
+        try:
+            project_id = int(callback.data.rsplit(":", 1)[-1])
+        except ValueError:
+            await callback.message.answer("Не удалось определить проект.")
+            return
+        await state.set_state(IndexNowUrlListStates.waiting_for_urls)
+        await state.update_data(
+            {
+                INDEXNOW_PROJECT_ID_STATE_KEY: project_id,
+                INDEXNOW_POSITION_STATE_KEY: action,
+                INDEXNOW_URL_BUFFER_STATE_KEY: [],
+            }
+        )
+        position_text = "в начало" if action == "first" else "в конец"
+        await callback.message.answer(
+            f"Отправь список URL для добавления {position_text} очереди.\n\n"
+            "Можно прислать список в нескольких сообщениях или `.txt` файл.\n"
+            "Когда закончишь, нажми «Добавить в очередь»."
+        )
+        return
+    if action == "reset":
+        lock = _get_url_list_buffer_lock(callback.message.chat.id, callback.from_user.id)
+        async with lock:
+            await state.update_data({INDEXNOW_URL_BUFFER_STATE_KEY: []})
+        await callback.message.answer("Список очищен. Пришли новые URL.")
+        return
+    if action == "cancel":
+        await _clear_flow_state_preserving_settings(state)
+        await callback.message.answer("Добавление URL отменено.")
+        return
+    if action != "save":
+        return
+    lock = _get_url_list_buffer_lock(callback.message.chat.id, callback.from_user.id)
+    async with lock:
+        data = await state.get_data()
+        raw_urls = data.get(INDEXNOW_URL_BUFFER_STATE_KEY)
+        project_id = data.get(INDEXNOW_PROJECT_ID_STATE_KEY)
+        position = data.get(INDEXNOW_POSITION_STATE_KEY)
+        urls = [item for item in raw_urls if isinstance(item, str) and item.strip()] if isinstance(raw_urls, list) else []
+    if not isinstance(raw_urls, list) or not raw_urls or not isinstance(project_id, int):
+        await callback.message.answer("Список URL пока пуст.")
+        return
+    try:
+        project, added_count, total_count = add_indexnow_urls(project_id, urls, prepend=position == "first")
+    except ValueError as exc:
+        await callback.message.answer(str(exc))
+        return
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        f"Очередь IndexNow проекта «{project.project_name}» обновлена.\n\n"
+        f"Добавлено: {added_count}\n"
+        f"Всего в очереди: {total_count}"
     )
 
 
@@ -1726,6 +2126,95 @@ async def handle_yandex_recrawl_url_list_input(message: Message, state: FSMConte
     )
 
 
+@router.message(IndexNowUrlListStates.waiting_for_urls)
+async def handle_indexnow_url_list_input(message: Message, state: FSMContext) -> None:
+    """Accumulate IndexNow queue additions from text and TXT attachments."""
+
+    raw_urls = await _extract_urls_from_message(message)
+    if raw_urls is None:
+        return
+    if not raw_urls:
+        await message.answer("Не удалось распознать URL. Отправь адреса сообщением или `.txt` файлом.")
+        return
+    user_id = message.from_user.id if message.from_user else 0
+    lock = _get_url_list_buffer_lock(message.chat.id, user_id)
+    async with lock:
+        data = await state.get_data()
+        buffered_urls = data.get(INDEXNOW_URL_BUFFER_STATE_KEY)
+        if not isinstance(buffered_urls, list):
+            buffered_urls = []
+        buffered_urls.extend(raw_urls)
+        await state.update_data({INDEXNOW_URL_BUFFER_STATE_KEY: buffered_urls})
+        total_count = len(buffered_urls)
+    await message.answer(
+        "Список URL обновлён.\n\n"
+        f"Добавлено в этом сообщении: {len(raw_urls)}\n"
+        f"Всего в буфере: {total_count}\n\n"
+        "Можешь прислать ещё одну порцию URL или нажать «Добавить в очередь».",
+        reply_markup=build_indexnow_collect_keyboard(url_count=total_count),
+    )
+
+
+@router.message(IndexNowKeyStates.waiting_for_key)
+async def handle_indexnow_key_input(message: Message, state: FSMContext) -> None:
+    """Collect a new IndexNow key without exposing it again in chat."""
+
+    user = message.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await _clear_flow_state_preserving_settings(state)
+        await message.answer("Настраивать ключи IndexNow может только root-админ.")
+        return
+    key = (message.text or "").strip()
+    if not key or key.startswith("/"):
+        await message.answer("Пришли ключ IndexNow одним сообщением или отправь /cancel.")
+        return
+    await state.update_data({INDEXNOW_KEY_STATE_KEY: key})
+    await state.set_state(IndexNowKeyStates.waiting_for_key_location)
+    await message.answer(
+        "Теперь пришли полный URL `.txt` файла с этим ключом на сайте.\n\n"
+        "Пример: https://example.com/indexnow-key.txt\n"
+        "Если файл лежит в корне и называется `<ключ>.txt`, отправь `-`."
+    )
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+@router.message(IndexNowKeyStates.waiting_for_key_location)
+async def handle_indexnow_key_location_input(message: Message, state: FSMContext) -> None:
+    """Store a project key after its public verification-file URL is supplied."""
+
+    user = message.from_user
+    if user is None or not is_root_admin_user(user.id):
+        await _clear_flow_state_preserving_settings(state)
+        await message.answer("Настраивать ключи IndexNow может только root-админ.")
+        return
+    data = await state.get_data()
+    project_id = data.get(INDEXNOW_KEY_PROJECT_ID_STATE_KEY)
+    key = data.get(INDEXNOW_KEY_STATE_KEY)
+    if not isinstance(project_id, int) or not isinstance(key, str):
+        await _clear_flow_state_preserving_settings(state)
+        await message.answer("Не удалось сохранить ключ. Начни настройку заново.")
+        return
+    location = (message.text or "").strip()
+    try:
+        save_indexnow_credential(project_id=project_id, key=key, key_location=None if location == "-" else location)
+    except (RuntimeError, ValueError) as error:
+        await message.answer(f"Не удалось сохранить ключ: {error}")
+        return
+    project = get_project(project_id)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await _clear_flow_state_preserving_settings(state)
+    await message.answer(
+        f"Ключ IndexNow для проекта «{project.project_name if project else project_id}» сохранён.\n\n"
+        "Ключ и сообщение с ним удалены из чата."
+    )
+
+
 @router.message(YandexAccessTokenStates.waiting_for_token)
 async def handle_yandex_access_token_input(message: Message, state: FSMContext) -> None:
     """Store the root-admin's manually issued Yandex OAuth token."""
@@ -2163,8 +2652,10 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         return
 
     if not has_xlsx and not has_csv:
-        if task.task_type == "yandex_webmaster_recrawl":
-            lines.extend(_format_yandex_recrawl_completion(task.result_payload, has_report=False))
+        if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
+            lines.extend(_format_indexing_completion(task.result_payload, has_report=False))
+        elif task.task_type == "indexnow_sitemap_replace":
+            lines.extend(_format_indexnow_sitemap_replace_completion(task.result_payload))
         elif task.task_type == "fetch_robots":
             lines.extend(["", "Парсинг robots.txt завершён."])
         else:
@@ -2173,8 +2664,8 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         await message.answer("\n".join(lines), reply_markup=reply_markup)
         return
 
-    if task.task_type == "yandex_webmaster_recrawl":
-        lines.extend(_format_yandex_recrawl_completion(task.result_payload, has_report=True))
+    if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
+        lines.extend(_format_indexing_completion(task.result_payload, has_report=True))
     else:
         lines.extend(["", "Парсинг завершён.", "Файлы результата готовы."])
     await message.answer("\n".join(lines))
@@ -2186,25 +2677,51 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         await message.answer("Готово.", reply_markup=build_main_menu_keyboard())
 
 
-def _format_yandex_recrawl_completion(result_payload: object, *, has_report: bool) -> list[str]:
-    """Describe a recrawl task without calling it a parsing result."""
+def _format_indexing_completion(result_payload: object, *, has_report: bool) -> list[str]:
+    """Describe an indexing task without calling it a parsing result."""
 
     payload = result_payload if isinstance(result_payload, dict) else {}
     status = payload.get("indexing_status")
     remaining_pages = payload.get("remaining_pages")
+    channel = payload.get("channel")
     lines = [""]
+    is_indexnow = channel == "indexnow"
+    action_label = "Отправка IndexNow" if is_indexnow else "Отправка на переобход"
     if status == "completed":
-        lines.append("Отправка на переобход завершена.")
+        lines.append(f"{action_label} завершена.")
+    elif status == "cancelled":
+        lines.append(f"{action_label} остановлена пользователем. Неотправленные URL остались в очереди.")
     elif status == "quota_reached":
         lines.append("Достигнута квота Яндекс Вебмастера. Неотправленные URL остались в очереди.")
+    elif status == "rate_limited":
+        lines.append("IndexNow временно ограничил количество запросов. Неотправленные URL остались в очереди.")
+    elif status == "invalid_host":
+        lines.append("В очереди найден URL другого хоста. Неотправленные URL остались в очереди.")
+    elif status == "connection_error":
+        api_name = "IndexNow" if is_indexnow else "Яндекс Вебмастера"
+        lines.append(f"Не удалось подключиться к API {api_name}. Неотправленные URL остались в очереди.")
     elif isinstance(status, str) and status.startswith("api_error_"):
-        lines.append("Отправка на переобход приостановлена из-за ошибки API. Неотправленные URL остались в очереди.")
+        lines.append(f"{action_label} приостановлена из-за ошибки API. Неотправленные URL остались в очереди.")
     else:
-        lines.append("Отправка на переобход завершена.")
+        lines.append(f"{action_label} завершена.")
     if isinstance(remaining_pages, int) and remaining_pages:
         lines.append(f"В очереди осталось: {remaining_pages} URL.")
     if has_report:
         lines.append("Файл отчета готов.")
+    return lines
+
+
+def _format_indexnow_sitemap_replace_completion(result_payload: object) -> list[str]:
+    """Describe a completed full sitemap replacement without calling it parsing."""
+
+    payload = result_payload if isinstance(result_payload, dict) else {}
+    project_name = payload.get("project_name")
+    queue_count = payload.get("indexnow_queue_url_count")
+    lines = ["", "Очередь IndexNow заполнена из sitemap."]
+    if isinstance(project_name, str):
+        lines.append(f"Проект: {project_name}")
+    if isinstance(queue_count, int):
+        lines.append(f"URL в очереди: {queue_count}")
     return lines
 
 
@@ -2362,6 +2879,7 @@ def _format_task_progress(result_payload: object) -> list[str]:
     remaining_pages = result_payload.get("remaining_pages")
     indexing_status = result_payload.get("indexing_status")
     indexing_error = result_payload.get("indexing_error")
+    indexing_channel = result_payload.get("channel")
     recrawl_pages_per_minute = result_payload.get("recrawl_pages_per_minute")
     recrawl_checkpoint_at = result_payload.get("recrawl_checkpoint_at")
     recrawl_queue_replaced = result_payload.get("recrawl_queue_replaced")
@@ -2409,7 +2927,8 @@ def _format_task_progress(result_payload: object) -> list[str]:
     if isinstance(pages_discovered, int):
         lines.append(f"- найдено URL: {pages_discovered}")
     if isinstance(submitted_pages, int):
-        lines.append(f"- отправлено на переобход: {submitted_pages}")
+        submitted_label = "отправлено в IndexNow" if indexing_channel == "indexnow" else "отправлено на переобход"
+        lines.append(f"- {submitted_label}: {submitted_pages}")
     if isinstance(remaining_pages, int):
         lines.append(f"- осталось в очереди: {remaining_pages}")
     if isinstance(recrawl_pages_per_minute, int | float):

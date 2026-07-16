@@ -52,6 +52,7 @@ The project already includes:
 - sitemap CSV and XLSX exports with optional HTTP status-code checks
 - optional transfer of project sitemap URLs into a Yandex Webmaster recrawl queue
 - Yandex Webmaster recrawl queues with a manually connected OAuth token
+- IndexNow queues with encrypted per-project keys and batched submissions of up to 10,000 URLs
 - indexing report export and live recrawl progress in Telegram
 - launch tracking and task status reporting in Telegram
 - partial result checkpoints for long-running crawl tasks
@@ -65,7 +66,6 @@ The platform is intended to grow into a broader SEO automation system, including
 
 - extended Yandex Webmaster workflows, including index status retrieval and URL removal
 - URL submission and removal flows through the Google Indexing API
-- IndexNow API integration
 - interaction with Google Search Console
 - technical audits based on collected crawl and indexing data
 - export pipelines for reporting data
@@ -128,6 +128,8 @@ Sitemap parsing is available from the Telegram bot for saved projects, a direct 
 For saved projects, sitemap URLs can optionally replace that project's Yandex Webmaster recrawl CSV queue. The bot supports adding URLs manually at the beginning or end of a queue, submitting queues project by project or for all ready projects, and downloading the aggregate `indexing_report.xlsx` report.
 
 The Yandex connection uses a manually issued OAuth token, encrypted in the application database. See [Yandex OAuth and recrawl setup](docs/yandex-oauth-and-recrawl.md).
+
+IndexNow uses a separate CSV queue per project. The bot submits URLs in batches of up to 10,000 and retains a batch in the queue if the API returns an error. Each project has its own encrypted key and optional key-file URL. See [IndexNow setup](docs/indexnow.md).
 
 ## Why Telegram
 

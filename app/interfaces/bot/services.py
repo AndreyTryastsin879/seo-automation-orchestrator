@@ -20,6 +20,13 @@ from app.modules.indexing.yandex_webmaster import (
     get_recrawl_queue_count,
     prepend_recrawl_urls,
 )
+from app.modules.indexing.indexnow import (
+    append_indexnow_urls,
+    get_indexnow_queue_count,
+    get_sitemap_export_path,
+    prepend_indexnow_urls,
+)
+from app.modules.indexnow.service import has_indexnow_credential
 from app.modules.bot_access.application import (
     BotAccessUserDTO,
     CreateBotAccessUserUseCase,
@@ -133,6 +140,23 @@ class BatchStatusResult:
 
 
 @dataclass(slots=True, frozen=True)
+class IndexNowProjectSummary:
+    """Project state shown before submitting a queued IndexNow batch."""
+
+    project: ProjectDTO
+    queue_count: int
+    has_key: bool
+
+
+@dataclass(slots=True, frozen=True)
+class IndexNowSitemapProjectSummary:
+    """Sitemap export availability shown before replacing an IndexNow queue."""
+
+    project: ProjectDTO
+    has_sitemap_export: bool
+
+
+@dataclass(slots=True, frozen=True)
 class AdHocCrawlLaunchResult:
     """Result of creating an ad-hoc crawl task from the bot."""
 
@@ -228,6 +252,35 @@ class ProjectYandexRecrawlLaunchResult:
 @dataclass(slots=True, frozen=True)
 class BulkYandexRecrawlLaunchResult:
     """Result of starting recrawl queues for all eligible projects."""
+
+    batch: TaskBatchDTO | None
+    total_projects: int
+    skipped_projects: int
+    task_ids: list[int]
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectIndexNowLaunchResult:
+    """Result of starting IndexNow submission for one project."""
+
+    batch: TaskBatchDTO
+    project: ProjectDTO
+    task: TaskDTO
+
+
+@dataclass(slots=True, frozen=True)
+class BulkIndexNowLaunchResult:
+    """Result of starting IndexNow submission for all ready projects."""
+
+    batch: TaskBatchDTO | None
+    total_projects: int
+    skipped_projects: int
+    task_ids: list[int]
+
+
+@dataclass(slots=True, frozen=True)
+class BulkIndexNowSitemapReplaceLaunchResult:
+    """Result of launching full sitemap-to-IndexNow queue replacement."""
 
     batch: TaskBatchDTO | None
     total_projects: int
@@ -618,6 +671,170 @@ def launch_all_projects_yandex_recrawl() -> BulkYandexRecrawlLaunchResult:
         for task_id in task_ids:
             TaskQueue(queue_name=CRAWL_DEFAULT_QUEUE_NAME).enqueue(task_id, task_type="yandex_webmaster_recrawl")
         return BulkYandexRecrawlLaunchResult(
+            batch=task_batch,
+            total_projects=len(eligible_projects),
+            skipped_projects=len(projects) - len(eligible_projects),
+            task_ids=task_ids,
+        )
+    finally:
+        session.close()
+
+
+def list_indexnow_projects() -> list[IndexNowProjectSummary]:
+    """Return all projects with current IndexNow queue and key states."""
+
+    return [
+        IndexNowProjectSummary(
+            project=project,
+            queue_count=get_indexnow_queue_count(slugify(project.project_name)),
+            has_key=has_indexnow_credential(project.id),
+        )
+        for project in list_all_projects()
+    ]
+
+
+def add_indexnow_urls(project_id: int, urls: list[str], *, prepend: bool) -> tuple[ProjectDTO, int, int]:
+    """Insert URLs at the selected edge of one IndexNow project queue."""
+
+    project = get_project(project_id)
+    if project is None:
+        raise ValueError("Проект не найден.")
+    project_slug = slugify(project.project_name)
+    added_count = prepend_indexnow_urls(project_slug, urls) if prepend else append_indexnow_urls(project_slug, urls)
+    return project, added_count, get_indexnow_queue_count(project_slug)
+
+
+def launch_project_indexnow(project_id: int) -> ProjectIndexNowLaunchResult:
+    """Create one IndexNow task for a selected project's queue."""
+
+    session = SessionFactory()
+    try:
+        project_repository = ProjectRepository(session)
+        project = project_repository.get_by_id(project_id)
+        if project is None:
+            raise ValueError("Проект не найден.")
+        if not project.start_url:
+            raise ValueError(f"В проекте «{project.project_name}» не заполнен стартовый URL.")
+        if not has_indexnow_credential(project.id):
+            raise ValueError(f"Для проекта «{project.project_name}» не настроен ключ IndexNow.")
+        queue_count = get_indexnow_queue_count(slugify(project.project_name))
+        if queue_count == 0:
+            raise ValueError(f"В очереди проекта «{project.project_name}» нет URL.")
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.INDEXNOW_SUBMIT_PROJECT,
+            title=f"IndexNow: {project.project_name}",
+            payload={"project_ids": [project.id]},
+        )
+        task = _create_indexnow_submit_task(
+            session=session,
+            batch_id=task_batch.id,
+            project_id=project.id,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+        )
+        project_dto = GetProjectUseCase(project_repository).execute(project.id)
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="indexnow_submit")
+        return ProjectIndexNowLaunchResult(batch=task_batch, project=project_dto, task=task)
+    finally:
+        session.close()
+
+
+def launch_all_projects_indexnow() -> BulkIndexNowLaunchResult:
+    """Create IndexNow tasks for every project with a key, URL and queue."""
+
+    session = SessionFactory()
+    try:
+        projects = ProjectRepository(session).list()
+        eligible_projects = [
+            project
+            for project in projects
+            if project.start_url
+            and has_indexnow_credential(project.id)
+            and get_indexnow_queue_count(slugify(project.project_name)) > 0
+        ]
+        if not eligible_projects:
+            return BulkIndexNowLaunchResult(batch=None, total_projects=0, skipped_projects=len(projects), task_ids=[])
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.INDEXNOW_SUBMIT_ALL,
+            title="IndexNow: все проекты",
+            payload={"project_ids": [project.id for project in eligible_projects]},
+        )
+        task_ids: list[int] = []
+        for project in eligible_projects:
+            task = _create_indexnow_submit_task(
+                session=session,
+                batch_id=task_batch.id,
+                project_id=project.id,
+                queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            )
+            task_ids.append(task.id)
+        session.commit()
+        for task_id in task_ids:
+            TaskQueue(queue_name=CRAWL_DEFAULT_QUEUE_NAME).enqueue(task_id, task_type="indexnow_submit")
+        return BulkIndexNowLaunchResult(
+            batch=task_batch,
+            total_projects=len(eligible_projects),
+            skipped_projects=len(projects) - len(eligible_projects),
+            task_ids=task_ids,
+        )
+    finally:
+        session.close()
+
+
+def list_indexnow_sitemap_projects() -> list[IndexNowSitemapProjectSummary]:
+    """List projects and whether a sitemap CSV export is available."""
+
+    return [
+        IndexNowSitemapProjectSummary(
+            project=project,
+            has_sitemap_export=get_sitemap_export_path(slugify(project.project_name)).exists(),
+        )
+        for project in list_all_projects()
+    ]
+
+
+def launch_indexnow_sitemap_replace(project_ids: list[int]) -> BulkIndexNowSitemapReplaceLaunchResult:
+    """Queue replacement tasks using already exported sitemap CSV files."""
+
+    session = SessionFactory()
+    try:
+        projects = [project for project in ProjectRepository(session).list() if project.id in set(project_ids)]
+        eligible_projects = [
+            project for project in projects if get_sitemap_export_path(slugify(project.project_name)).exists()
+        ]
+        if not eligible_projects:
+            return BulkIndexNowSitemapReplaceLaunchResult(batch=None, total_projects=0, skipped_projects=len(projects), task_ids=[])
+        batch_type = (
+            TaskBatchType.INDEXNOW_SITEMAP_REPLACE_PROJECT
+            if len(eligible_projects) == 1
+            else TaskBatchType.INDEXNOW_SITEMAP_REPLACE_ALL
+        )
+        title = (
+            f"IndexNow: полный sitemap {eligible_projects[0].project_name}"
+            if len(eligible_projects) == 1
+            else "IndexNow: полные sitemap всех проектов"
+        )
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=batch_type,
+            title=title,
+            payload={"project_ids": [project.id for project in eligible_projects]},
+        )
+        task_ids = [
+            _create_indexnow_sitemap_replace_task(
+                session=session,
+                batch_id=task_batch.id,
+                project_id=project.id,
+                queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            ).id
+            for project in eligible_projects
+        ]
+        session.commit()
+        for task_id in task_ids:
+            TaskQueue(queue_name=CRAWL_DEFAULT_QUEUE_NAME).enqueue(task_id, task_type="indexnow_sitemap_replace")
+        return BulkIndexNowSitemapReplaceLaunchResult(
             batch=task_batch,
             total_projects=len(eligible_projects),
             skipped_projects=len(projects) - len(eligible_projects),
@@ -1172,9 +1389,9 @@ def cancel_task_batch(batch_id: int) -> CancelTaskBatchResult | None:
             task.cancel_requested = True
             task_repository.update(task)
             job_id = started_jobs_by_task_id.get(task.id)
-            # Recrawl checks the flag between requests and then saves a report.
-            # Stopping its RQ workhorse would skip that cleanup and report write.
-            if job_id is not None and task.task_type != "yandex_webmaster_recrawl":
+            # Indexing tasks check this flag and then save their report.
+            # Stopping the RQ workhorse would skip that cleanup.
+            if job_id is not None and task.task_type not in {"yandex_webmaster_recrawl", "indexnow_submit"}:
                 send_stop_job_command(get_redis_connection(), job_id)
             running_cancel_requested += 1
 
@@ -1299,6 +1516,48 @@ def _create_yandex_recrawl_task(
             project_id=project_id,
             queue_name=queue_name,
             task_type="yandex_webmaster_recrawl",
+            payload={"project_id": project_id},
+        )
+    )
+
+
+def _create_indexnow_submit_task(
+    *,
+    session,
+    batch_id: int | None,
+    project_id: int,
+    queue_name: str,
+) -> TaskDTO:
+    """Create a task that drains one project's IndexNow CSV queue."""
+
+    task_repository = TaskRepository(session)
+    create_task = CreateTaskUseCase(task_repository)
+    return create_task.execute(
+        CreateTaskCommand(
+            batch_id=batch_id,
+            project_id=project_id,
+            queue_name=queue_name,
+            task_type="indexnow_submit",
+            payload={"project_id": project_id},
+        )
+    )
+
+
+def _create_indexnow_sitemap_replace_task(
+    *,
+    session,
+    batch_id: int | None,
+    project_id: int,
+    queue_name: str,
+) -> TaskDTO:
+    """Create a task that replaces an IndexNow queue from a sitemap CSV export."""
+
+    return CreateTaskUseCase(TaskRepository(session)).execute(
+        CreateTaskCommand(
+            batch_id=batch_id,
+            project_id=project_id,
+            queue_name=queue_name,
+            task_type="indexnow_sitemap_replace",
             payload={"project_id": project_id},
         )
     )
