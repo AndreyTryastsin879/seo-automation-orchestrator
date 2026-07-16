@@ -17,6 +17,7 @@ Already implemented:
 - Yandex Webmaster recrawl queues, cancellation, live progress, and aggregate XLSX reporting
 - encrypted storage for a manually issued shared Yandex OAuth token
 - IndexNow queues with encrypted per-project keys, batched submission, cancellation, and aggregate XLSX reporting
+- one-time replacement of IndexNow queues from completed project sitemap CSV exports
 - structured logs and a production deployment stack for API, webhook bot, workers, Redis, PostgreSQL, and Caddy
 
 ## Next Release
@@ -67,10 +68,13 @@ Delivered:
 - submit file-backed CSV queues with manual priority insertion
 - send batches of up to 10,000 URLs through Yandex's IndexNow endpoint
 - preserve failed batches and provide cancellation and aggregate XLSX reports
+- replace one or all IndexNow queues from the latest completed sitemap CSV exports
 
 Next improvement:
 
-- keep a sitemap snapshot per project and add only new or materially changed URLs to IndexNow queues after later sitemap parses
+- keep a sitemap snapshot per project after the initial full import
+- compare later sitemap parses with that snapshot and add only new or materially changed URLs to IndexNow queues
+- treat URLs missing from sitemap as deletion candidates; submit them only after a confirmed `404` or `410`
 
 ## Planned Capabilities By Module
 
