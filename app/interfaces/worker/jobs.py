@@ -47,7 +47,9 @@ from app.modules.tasks.infrastructure import Task, TaskFile, TaskFileRepository,
 from app.modules.yandex_oauth.service import get_yandex_access_token
 
 HTTP_TIMEOUT_SECONDS = 15
-SITEMAP_FETCH_TIMEOUT_SECONDS = 30
+SITEMAP_FETCH_TIMEOUT_SECONDS = 90
+SITEMAP_FETCH_ATTEMPTS = 3
+SITEMAP_FETCH_RETRY_DELAYS_SECONDS = (2, 5)
 SITEMAP_ENTRY_LIMIT = 100
 SITEMAP_STATUS_CHECK_TIMEOUT_SECONDS = 10
 SITEMAP_STATUS_CHECK_MAX_CONCURRENCY = 10
@@ -1031,11 +1033,7 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
         raise ValueError("fetch_sitemap payload must contain non-empty string field 'url'.")
     resolve_status_codes = bool(payload.get("resolve_status_codes", True))
 
-    fetched = _fetch_url(
-        url.strip(),
-        error_prefix="fetch_sitemap",
-        timeout_seconds=SITEMAP_FETCH_TIMEOUT_SECONDS,
-    )
+    fetched = _fetch_sitemap_url(url.strip())
 
     if not _is_xml_response(fetched.content_type):
         result_payload: JsonPayload = {
@@ -1058,7 +1056,7 @@ def _execute_fetch_sitemap_task(payload: JsonPayload | None) -> _TaskExecutionRe
             )
         return _TaskExecutionResult(result_payload=result_payload)
 
-    aggregation = _collect_sitemap_urls(url.strip(), visited=set())
+    aggregation = _collect_sitemap_urls(url.strip(), visited=set(), prefetched_response=fetched)
     export_urls = aggregation["urls"] if aggregation["status_code"] == 200 else None
     export_sitemap_rows = None
     if export_urls is not None:
@@ -1888,7 +1886,12 @@ def _extract_page_data(*, page_url: str, content_type: str | None, body: bytes) 
     )
 
 
-def _collect_sitemap_urls(url: str, *, visited: set[str]) -> JsonPayload:
+def _collect_sitemap_urls(
+    url: str,
+    *,
+    visited: set[str],
+    prefetched_response: _FetchedResponse | None = None,
+) -> JsonPayload:
     """Collect URLs from a sitemap or sitemap index."""
 
     if url in visited:
@@ -1901,11 +1904,7 @@ def _collect_sitemap_urls(url: str, *, visited: set[str]) -> JsonPayload:
         }
 
     visited.add(url)
-    fetched = _fetch_url(
-        url,
-        error_prefix="fetch_sitemap",
-        timeout_seconds=SITEMAP_FETCH_TIMEOUT_SECONDS,
-    )
+    fetched = prefetched_response or _fetch_sitemap_url(url)
     if not _is_xml_response(fetched.content_type):
         raise ValueError("fetch_sitemap response does not look like XML sitemap.")
 
@@ -1941,6 +1940,39 @@ def _collect_sitemap_urls(url: str, *, visited: set[str]) -> JsonPayload:
         "sitemap_type": sitemap_type,
         "urls": aggregated_urls,
     }
+
+
+def _fetch_sitemap_url(url: str) -> _FetchedResponse:
+    """Fetch one sitemap file with retries for temporary network timeouts."""
+
+    for attempt in range(1, SITEMAP_FETCH_ATTEMPTS + 1):
+        try:
+            return _fetch_url(
+                url,
+                error_prefix="fetch_sitemap",
+                timeout_seconds=SITEMAP_FETCH_TIMEOUT_SECONDS,
+            )
+        except ValueError as error:
+            is_temporary_network_error = str(error).startswith("fetch_sitemap request failed:")
+            if not is_temporary_network_error or attempt == SITEMAP_FETCH_ATTEMPTS:
+                if is_temporary_network_error and attempt == SITEMAP_FETCH_ATTEMPTS:
+                    raise ValueError(
+                        f"fetch_sitemap request failed after {SITEMAP_FETCH_ATTEMPTS} attempts: {error}"
+                    ) from error
+                raise
+            delay_seconds = SITEMAP_FETCH_RETRY_DELAYS_SECONDS[attempt - 1]
+            log_event(
+                LOGGER,
+                "sitemap_fetch_retry",
+                level=30,
+                url=url,
+                attempt=attempt,
+                delay_seconds=delay_seconds,
+                error=str(error),
+            )
+            time.sleep(delay_seconds)
+
+    raise AssertionError("Sitemap retry loop ended unexpectedly.")
 
 
 def _is_html_response(content_type: str | None) -> bool:
