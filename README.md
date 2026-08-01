@@ -53,6 +53,7 @@ The project already includes:
 - optional transfer of project sitemap URLs into a Yandex Webmaster recrawl queue
 - Yandex Webmaster recrawl queues with a manually connected OAuth token
 - IndexNow queues with encrypted per-project keys and batched submissions of up to 10,000 URLs
+- static XML sitemap snapshots for manual publication and submission to Yandex Webmaster
 - indexing report export and live recrawl progress in Telegram
 - launch tracking and task status reporting in Telegram
 - partial result checkpoints for long-running crawl tasks
@@ -128,6 +129,12 @@ Sitemap parsing is available from the Telegram bot for saved projects, a direct 
 For saved projects, sitemap URLs can optionally replace that project's Yandex Webmaster recrawl CSV queue. The bot supports adding URLs manually at the beginning or end of a queue, submitting queues project by project or for all ready projects, and downloading the aggregate `indexing_report.xlsx` report.
 
 The Yandex connection uses a manually issued OAuth token, encrypted in the application database. See [Yandex OAuth and recrawl setup](docs/yandex-oauth-and-recrawl.md).
+
+### Static Sitemaps
+
+For any saved project with a sitemap, the bot can create a fresh static XML snapshot. Every leaf sitemap from a sitemap index is preserved as a separate XML file under `storage/static_sitemaps/<project-slug>/`; a small `sitemap-index.xml` is added to reference the saved files.
+
+The application intentionally does not deploy these files. Upload the XML files from that project folder to `/static_sitemap/` on the matching website, then use the bot to register the published sitemap URLs in Yandex Webmaster. The project must have a configured Yandex Webmaster host. The local `manifest.json` is application metadata and does not need to be uploaded. Subdomain-specific publication is not part of this workflow yet.
 
 IndexNow uses a separate CSV queue per project. The bot submits URLs in batches of up to 10,000 and retains a batch in the queue if the API returns an error. Each project has its own encrypted key and optional key-file URL. See [IndexNow setup](docs/indexnow.md).
 

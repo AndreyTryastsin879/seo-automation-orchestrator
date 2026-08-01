@@ -5,7 +5,14 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from app.interfaces.bot.services import IndexNowProjectSummary, IndexNowSitemapProjectSummary, RecentBatchSummary, RecentTaskSummary, YandexRecrawlProjectSummary
+from app.interfaces.bot.services import (
+    IndexNowProjectSummary,
+    IndexNowSitemapProjectSummary,
+    RecentBatchSummary,
+    RecentTaskSummary,
+    StaticSitemapProjectSummary,
+    YandexRecrawlProjectSummary,
+)
 from app.interfaces.bot.services import CrawlLaunchSettings
 from app.modules.bot_access.application import BotAccessUserDTO
 from app.modules.projects.application import ProjectDTO
@@ -106,6 +113,7 @@ def build_indexing_actions_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Яндекс Вебмастер", callback_data="indexing:yandex")
     builder.button(text="IndexNow", callback_data="indexing:indexnow")
+    builder.button(text="Статические карты", callback_data="indexing:static_sitemaps")
     builder.button(text="Подключение Яндекс", callback_data="indexing:yandex:connection")
     builder.adjust(1)
     return builder.as_markup()
@@ -127,6 +135,39 @@ def build_indexnow_actions_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="Отправить URL", callback_data="indexing:indexnow:submit")
     builder.button(text="Заполнить очереди из sitemap", callback_data="indexing:indexnow:sitemap")
     builder.button(text="Настроить ключ", callback_data="indexing:indexnow:settings")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_static_sitemap_actions_keyboard() -> InlineKeyboardMarkup:
+    """Build actions for static sitemap snapshots."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Создать статическую карту", callback_data="indexing:static:create")
+    builder.button(text="Отправить карты в Яндекс Вебмастер", callback_data="indexing:static:send")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_static_sitemap_projects_keyboard(
+    projects: list[StaticSitemapProjectSummary], *, action: str
+) -> InlineKeyboardMarkup:
+    """List projects for static sitemap creation or Yandex submission."""
+
+    builder = InlineKeyboardBuilder()
+    for summary in projects:
+        if action == "create":
+            state = "sitemap OK" if summary.project.sitemap_path else "нет sitemap"
+        else:
+            maps_state = f"{summary.static_map_count} карт" if summary.static_map_count else "нет карт"
+            host_state = "хост OK" if summary.has_yandex_host else "нет хоста"
+            state = f"{maps_state} · {host_state}"
+        builder.button(
+            text=f"{summary.project.project_name} · {state}",
+            callback_data=f"indexing:static:{action}:project:{summary.project.id}",
+        )
+    all_label = "Сделать всем" if action == "create" else "Отправить все"
+    builder.button(text=all_label, callback_data=f"indexing:static:{action}:all")
     builder.adjust(1)
     return builder.as_markup()
 

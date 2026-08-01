@@ -52,6 +52,8 @@ from app.interfaces.bot.keyboards import (
     build_sitemap_project_selection_keyboard,
     build_sitemap_robots_actions_keyboard,
     build_sitemap_settings_keyboard,
+    build_static_sitemap_actions_keyboard,
+    build_static_sitemap_projects_keyboard,
     build_yandex_recrawl_collect_keyboard,
     build_yandex_recrawl_project_keyboard,
     build_yandex_recrawl_projects_keyboard,
@@ -91,12 +93,14 @@ from app.interfaces.bot.services import (
     launch_project_crawl,
     launch_project_robots,
     launch_project_sitemap,
+    launch_static_sitemap_tasks,
     launch_ad_hoc_crawl,
     list_all_projects,
     list_yandex_recrawl_projects,
     list_indexnow_projects,
     list_indexnow_sitemap_projects,
     list_recent_batches,
+    list_static_sitemap_projects,
     list_projects,
     remove_allowed_bot_user,
     update_project,
@@ -533,6 +537,104 @@ async def handle_indexnow_menu(callback: CallbackQuery, state: FSMContext) -> No
         "Отправляет URL в Яндекс и другие подключенные поисковые системы. "
         "Для каждого сайта нужен ключевой `.txt` файл, размещённый на самом сайте.",
         reply_markup=build_indexnow_actions_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "indexing:static_sitemaps")
+async def handle_static_sitemap_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Open static sitemap snapshot actions."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await callback.message.answer(
+        "Статические карты.\n\n"
+        "Создай свежую копию XML-карт проекта, затем загрузи XML-файлы из папки "
+        "`storage/static_sitemaps/<slug>/` на сайт в `/static_sitemap/`.\n\n"
+        "После загрузки карт можно отправить их адреса в Яндекс Вебмастер.",
+        reply_markup=build_static_sitemap_actions_keyboard(),
+    )
+
+
+@router.callback_query(F.data.in_({"indexing:static:create", "indexing:static:send"}))
+async def handle_static_sitemap_projects(callback: CallbackQuery, state: FSMContext) -> None:
+    """List all projects for one static sitemap action."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    action = callback.data.rsplit(":", 1)[-1]
+    projects = list_static_sitemap_projects()
+    if not projects:
+        await callback.message.answer("Список проектов пока пуст.")
+        return
+    if action == "create":
+        text = (
+            "Выбери проект для создания свежих статических карт.\n\n"
+            "Новая копия полностью заменит предыдущие XML-файлы проекта в storage."
+        )
+    else:
+        text = (
+            "Выбери проект для отправки статических карт в Яндекс Вебмастер.\n\n"
+            "Перед запуском файлы должны быть загружены на сайт в `/static_sitemap/`. "
+            "В строке показаны число карт и готовность хоста Яндекс Вебмастера."
+        )
+    await callback.message.answer(
+        text,
+        reply_markup=build_static_sitemap_projects_keyboard(projects, action=action),
+    )
+
+
+@router.callback_query(F.data.startswith("indexing:static:"))
+async def handle_static_sitemap_launch(callback: CallbackQuery, state: FSMContext) -> None:
+    """Launch selected static sitemap creation or Yandex submission tasks."""
+
+    await callback.answer()
+    parts = callback.data.split(":")
+    if len(parts) not in {4, 5} or parts[2] not in {"create", "send"}:
+        await callback.message.answer("Не удалось определить действие со статическими картами.")
+        return
+    action = parts[2]
+    target = parts[3]
+    if target == "all" and len(parts) == 4:
+        project_ids = [summary.project.id for summary in list_static_sitemap_projects()]
+    elif target == "project" and len(parts) == 5:
+        try:
+            project_ids = [int(parts[4])]
+        except ValueError:
+            await callback.message.answer("Не удалось определить проект.")
+            return
+    else:
+        await callback.message.answer("Не удалось определить проект.")
+        return
+
+    await _clear_flow_state_preserving_settings(state)
+    try:
+        result = launch_static_sitemap_tasks(project_ids=project_ids, action=action)
+    except Exception:
+        await callback.message.answer("Не удалось запустить задачу со статическими картами.")
+        return
+    if result.batch is None:
+        if action == "create":
+            message = "Нет проектов с заполненными стартовым URL и sitemap."
+        else:
+            message = "Нет проектов с готовыми статическими картами, стартовым URL и хостом Яндекс Вебмастера."
+        await callback.message.answer(message)
+        return
+
+    if action == "create":
+        heading = "Создание статических карт запущено."
+        details = (
+            "После завершения загрузи XML-файлы из каждой папки проекта в "
+            "`storage/static_sitemaps/` в `/static_sitemap/` на соответствующем сайте."
+        )
+    else:
+        heading = "Отправка статических карт в Яндекс Вебмастер запущена."
+        details = "Статус будет доступен в разделе «Статус»."
+    await callback.message.answer(
+        f"{heading}\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проектов: {result.total_projects}\n"
+        f"Пропущено: {result.skipped_projects}\n\n"
+        f"{details}"
     )
 
 
@@ -2652,10 +2754,16 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         return
 
     if not has_xlsx and not has_csv:
-        if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
+        if task.task_type in {
+            "yandex_webmaster_recrawl",
+            "indexnow_submit",
+            "yandex_webmaster_static_sitemaps",
+        }:
             lines.extend(_format_indexing_completion(task.result_payload, has_report=False))
         elif task.task_type == "indexnow_sitemap_replace":
             lines.extend(_format_indexnow_sitemap_replace_completion(task.result_payload))
+        elif task.task_type == "create_static_sitemaps":
+            lines.extend(_format_static_sitemap_creation_completion(task.result_payload))
         elif task.task_type == "fetch_robots":
             lines.extend(["", "Парсинг robots.txt завершён."])
         else:
@@ -2664,7 +2772,7 @@ async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bo
         await message.answer("\n".join(lines), reply_markup=reply_markup)
         return
 
-    if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
+    if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit", "yandex_webmaster_static_sitemaps"}:
         lines.extend(_format_indexing_completion(task.result_payload, has_report=True))
     else:
         lines.extend(["", "Парсинг завершён.", "Файлы результата готовы."])
@@ -2684,13 +2792,21 @@ def _format_indexing_completion(result_payload: object, *, has_report: bool) -> 
     status = payload.get("indexing_status")
     remaining_pages = payload.get("remaining_pages")
     channel = payload.get("channel")
+    action = payload.get("action")
     lines = [""]
     is_indexnow = channel == "indexnow"
-    action_label = "Отправка IndexNow" if is_indexnow else "Отправка на переобход"
+    is_static_sitemap = action == "add_static_sitemaps"
+    if is_indexnow:
+        action_label = "Отправка IndexNow"
+    elif is_static_sitemap:
+        action_label = "Отправка статических карт в Яндекс Вебмастер"
+    else:
+        action_label = "Отправка на переобход"
     if status == "completed":
         lines.append(f"{action_label} завершена.")
     elif status == "cancelled":
-        lines.append(f"{action_label} остановлена пользователем. Неотправленные URL остались в очереди.")
+        remaining_label = "карты не были отправлены" if is_static_sitemap else "неотправленные URL остались в очереди"
+        lines.append(f"{action_label} остановлена пользователем. {remaining_label.capitalize()}.")
     elif status == "quota_reached":
         lines.append("Достигнута квота Яндекс Вебмастера. Неотправленные URL остались в очереди.")
     elif status == "rate_limited":
@@ -2705,7 +2821,10 @@ def _format_indexing_completion(result_payload: object, *, has_report: bool) -> 
     else:
         lines.append(f"{action_label} завершена.")
     if isinstance(remaining_pages, int) and remaining_pages:
-        lines.append(f"В очереди осталось: {remaining_pages} URL.")
+        if is_static_sitemap:
+            lines.append(f"Не отправлено карт: {remaining_pages}.")
+        else:
+            lines.append(f"В очереди осталось: {remaining_pages} URL.")
     if has_report:
         lines.append("Файл отчета готов.")
     return lines
@@ -2722,6 +2841,24 @@ def _format_indexnow_sitemap_replace_completion(result_payload: object) -> list[
         lines.append(f"Проект: {project_name}")
     if isinstance(queue_count, int):
         lines.append(f"URL в очереди: {queue_count}")
+    return lines
+
+
+def _format_static_sitemap_creation_completion(result_payload: object) -> list[str]:
+    """Describe a local static sitemap snapshot without promising a download."""
+
+    payload = result_payload if isinstance(result_payload, dict) else {}
+    project_name = payload.get("project_name")
+    map_count = payload.get("static_sitemap_count")
+    project_slug = payload.get("static_sitemap_directory")
+    lines = ["", "Статические карты созданы."]
+    if isinstance(project_name, str):
+        lines.append(f"Проект: {project_name}")
+    if isinstance(map_count, int):
+        lines.append(f"XML-файлов: {map_count}")
+    if isinstance(project_slug, str):
+        lines.append(f"Папка: storage/static_sitemaps/{project_slug}/")
+    lines.append("Загрузи XML-файлы из папки на сайт в /static_sitemap/ перед отправкой в Яндекс Вебмастер.")
     return lines
 
 
@@ -2880,6 +3017,7 @@ def _format_task_progress(result_payload: object) -> list[str]:
     indexing_status = result_payload.get("indexing_status")
     indexing_error = result_payload.get("indexing_error")
     indexing_channel = result_payload.get("channel")
+    indexing_action = result_payload.get("action")
     recrawl_pages_per_minute = result_payload.get("recrawl_pages_per_minute")
     recrawl_checkpoint_at = result_payload.get("recrawl_checkpoint_at")
     recrawl_queue_replaced = result_payload.get("recrawl_queue_replaced")
@@ -2927,10 +3065,18 @@ def _format_task_progress(result_payload: object) -> list[str]:
     if isinstance(pages_discovered, int):
         lines.append(f"- найдено URL: {pages_discovered}")
     if isinstance(submitted_pages, int):
-        submitted_label = "отправлено в IndexNow" if indexing_channel == "indexnow" else "отправлено на переобход"
+        if indexing_channel == "indexnow":
+            submitted_label = "отправлено в IndexNow"
+        elif indexing_action == "add_static_sitemaps":
+            submitted_label = "отправлено карт в Яндекс Вебмастер"
+        else:
+            submitted_label = "отправлено на переобход"
         lines.append(f"- {submitted_label}: {submitted_pages}")
     if isinstance(remaining_pages, int):
-        lines.append(f"- осталось в очереди: {remaining_pages}")
+        if indexing_action == "add_static_sitemaps":
+            lines.append(f"- не отправлено карт: {remaining_pages}")
+        else:
+            lines.append(f"- осталось в очереди: {remaining_pages}")
     if isinstance(recrawl_pages_per_minute, int | float):
         lines.append(f"- скорость отправки: {recrawl_pages_per_minute:.1f} URL/мин")
     if isinstance(recrawl_checkpoint_at, str) and recrawl_checkpoint_at:

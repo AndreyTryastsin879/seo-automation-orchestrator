@@ -18,6 +18,10 @@ class TaskBatchType(StrEnum):
     INDEXNOW_SUBMIT_ALL = "indexnow_submit_all"
     INDEXNOW_SITEMAP_REPLACE_PROJECT = "indexnow_sitemap_replace_project"
     INDEXNOW_SITEMAP_REPLACE_ALL = "indexnow_sitemap_replace_all"
+    STATIC_SITEMAP_CREATE_PROJECT = "static_sitemap_create_project"
+    STATIC_SITEMAP_CREATE_ALL = "static_sitemap_create_all"
+    YANDEX_WEBMASTER_STATIC_SITEMAP_PROJECT = "yandex_webmaster_static_sitemap_project"
+    YANDEX_WEBMASTER_STATIC_SITEMAP_ALL = "yandex_webmaster_static_sitemap_all"
 
 
 class TaskBatchStatus(StrEnum):

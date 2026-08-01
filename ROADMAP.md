@@ -18,6 +18,7 @@ Already implemented:
 - encrypted storage for a manually issued shared Yandex OAuth token
 - IndexNow queues with encrypted per-project keys, batched submission, cancellation, and aggregate XLSX reporting
 - one-time replacement of IndexNow queues from completed project sitemap CSV exports
+- static XML sitemap snapshots for manual site publication and Yandex Webmaster registration
 - structured logs and a production deployment stack for API, webhook bot, workers, Redis, PostgreSQL, and Caddy
 
 ## Next Release

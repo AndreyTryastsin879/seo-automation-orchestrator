@@ -27,6 +27,7 @@ from app.modules.indexing.indexnow import (
     prepend_indexnow_urls,
 )
 from app.modules.indexnow.service import has_indexnow_credential
+from app.modules.indexing.static_sitemaps import read_static_sitemap_manifest
 from app.modules.bot_access.application import (
     BotAccessUserDTO,
     CreateBotAccessUserUseCase,
@@ -157,6 +158,15 @@ class IndexNowSitemapProjectSummary:
 
 
 @dataclass(slots=True, frozen=True)
+class StaticSitemapProjectSummary:
+    """Project state shown for static sitemap creation and submission."""
+
+    project: ProjectDTO
+    static_map_count: int
+    has_yandex_host: bool
+
+
+@dataclass(slots=True, frozen=True)
 class AdHocCrawlLaunchResult:
     """Result of creating an ad-hoc crawl task from the bot."""
 
@@ -281,6 +291,16 @@ class BulkIndexNowLaunchResult:
 @dataclass(slots=True, frozen=True)
 class BulkIndexNowSitemapReplaceLaunchResult:
     """Result of launching full sitemap-to-IndexNow queue replacement."""
+
+    batch: TaskBatchDTO | None
+    total_projects: int
+    skipped_projects: int
+    task_ids: list[int]
+
+
+@dataclass(slots=True, frozen=True)
+class BulkStaticSitemapLaunchResult:
+    """Result of launching static sitemap creation or Yandex submission."""
 
     batch: TaskBatchDTO | None
     total_projects: int
@@ -844,6 +864,87 @@ def launch_indexnow_sitemap_replace(project_ids: list[int]) -> BulkIndexNowSitem
         session.close()
 
 
+def list_static_sitemap_projects() -> list[StaticSitemapProjectSummary]:
+    """List all projects with static snapshot and Yandex host state."""
+
+    summaries = []
+    for project in list_all_projects():
+        manifest = read_static_sitemap_manifest(slugify(project.project_name))
+        summaries.append(
+            StaticSitemapProjectSummary(
+                project=project,
+                static_map_count=len(manifest.files) if manifest is not None else 0,
+                has_yandex_host=bool(project.yandex_webmaster_host),
+            )
+        )
+    return summaries
+
+
+def launch_static_sitemap_tasks(*, project_ids: list[int], action: str) -> BulkStaticSitemapLaunchResult:
+    """Launch static sitemap creation or Yandex registration for selected projects."""
+
+    if action not in {"create", "send"}:
+        raise ValueError("Неизвестное действие со статическими картами.")
+    session = SessionFactory()
+    try:
+        projects = [project for project in ProjectRepository(session).list() if project.id in set(project_ids)]
+        if action == "create":
+            eligible = [project for project in projects if project.sitemap_path and project.start_url]
+            batch_type = (
+                TaskBatchType.STATIC_SITEMAP_CREATE_PROJECT
+                if len(eligible) == 1
+                else TaskBatchType.STATIC_SITEMAP_CREATE_ALL
+            )
+            title = "Создание статических карт" if len(eligible) != 1 else f"Статические карты: {eligible[0].project_name}"
+            task_type = "create_static_sitemaps"
+        else:
+            eligible = [
+                project
+                for project in projects
+                if project.start_url
+                and project.yandex_webmaster_host
+                and read_static_sitemap_manifest(slugify(project.project_name)) is not None
+            ]
+            batch_type = (
+                TaskBatchType.YANDEX_WEBMASTER_STATIC_SITEMAP_PROJECT
+                if len(eligible) == 1
+                else TaskBatchType.YANDEX_WEBMASTER_STATIC_SITEMAP_ALL
+            )
+            title = "Отправка статических карт в Яндекс" if len(eligible) != 1 else f"Яндекс: статические карты {eligible[0].project_name}"
+            task_type = "yandex_webmaster_static_sitemaps"
+        if not eligible:
+            return BulkStaticSitemapLaunchResult(batch=None, total_projects=0, skipped_projects=len(projects), task_ids=[])
+        task_batch = _create_task_batch(
+            session=session,
+            batch_type=batch_type,
+            title=title,
+            payload={"project_ids": [project.id for project in eligible], "action": action},
+        )
+        task_ids = []
+        for project in eligible:
+            task = CreateTaskUseCase(TaskRepository(session)).execute(
+                CreateTaskCommand(
+                    batch_id=task_batch.id,
+                    project_id=project.id,
+                    queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+                    task_type=task_type,
+                    payload={"project_id": project.id},
+                )
+            )
+            task_ids.append(task.id)
+        session.commit()
+        for task_id in task_ids:
+            TaskQueue(queue_name=CRAWL_DEFAULT_QUEUE_NAME).enqueue(task_id, task_type=task_type)
+        return BulkStaticSitemapLaunchResult(
+            batch=task_batch,
+            total_projects=len(eligible),
+            skipped_projects=len(projects) - len(eligible),
+            task_ids=task_ids,
+        )
+    finally:
+        session.close()
+
+
 def get_project(project_id: int) -> ProjectDTO | None:
     """Return one project by id for the bot."""
 
@@ -1391,7 +1492,11 @@ def cancel_task_batch(batch_id: int) -> CancelTaskBatchResult | None:
             job_id = started_jobs_by_task_id.get(task.id)
             # Indexing tasks check this flag and then save their report.
             # Stopping the RQ workhorse would skip that cleanup.
-            if job_id is not None and task.task_type not in {"yandex_webmaster_recrawl", "indexnow_submit"}:
+            if job_id is not None and task.task_type not in {
+                "yandex_webmaster_recrawl",
+                "indexnow_submit",
+                "yandex_webmaster_static_sitemaps",
+            }:
                 send_stop_job_command(get_redis_connection(), job_id)
             running_cancel_requested += 1
 

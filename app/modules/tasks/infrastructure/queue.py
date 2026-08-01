@@ -29,6 +29,8 @@ JOB_TIMEOUT_BY_TASK_TYPE: dict[str, int] = {
     "yandex_webmaster_recrawl": YANDEX_WEBMASTER_RECRAWL_JOB_TIMEOUT_SECONDS,
     "indexnow_submit": INDEXNOW_SUBMIT_JOB_TIMEOUT_SECONDS,
     "indexnow_sitemap_replace": SITEMAP_JOB_TIMEOUT_SECONDS,
+    "create_static_sitemaps": SITEMAP_JOB_TIMEOUT_SECONDS,
+    "yandex_webmaster_static_sitemaps": YANDEX_WEBMASTER_RECRAWL_JOB_TIMEOUT_SECONDS,
 }
 LOGGER = get_logger("app.tasks.queue")
 

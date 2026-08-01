@@ -15,6 +15,7 @@ from datetime import datetime, UTC
 from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from xml.etree import ElementTree
+from xml.sax.saxutils import escape as xml_escape
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
@@ -39,6 +40,7 @@ from app.modules.indexing.indexnow import (
     remove_indexnow_queue_entries,
     replace_indexnow_urls,
 )
+from app.modules.indexing.static_sitemaps import read_static_sitemap_manifest, save_static_sitemap_snapshot
 from app.modules.indexnow.service import get_indexnow_credential
 from app.modules.projects.infrastructure import ProjectRepository
 from app.modules.tasks.domain import JsonPayload
@@ -363,7 +365,7 @@ def execute_task(task_id: int) -> None:
                 task=task,
                 execution_result=execution_result,
             )
-        if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
+        if task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit", "yandex_webmaster_static_sitemaps"}:
             execution_result = _persist_indexing_report_artifact(
                 session=session,
                 task=task,
@@ -410,7 +412,7 @@ def execute_task(task_id: int) -> None:
                         task=task,
                         execution_result=execution_result,
                     )
-                if task is not None and task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit"}:
+                if task is not None and task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit", "yandex_webmaster_static_sitemaps"}:
                     execution_result = _persist_indexing_report_artifact(
                         session=session,
                         task=task,
@@ -471,6 +473,10 @@ def _execute_by_type(task_id: int, task_type: str, payload: JsonPayload | None) 
         return _execute_indexnow_submit_task(task_id, payload)
     if task_type == "indexnow_sitemap_replace":
         return _execute_indexnow_sitemap_replace_task(payload)
+    if task_type == "create_static_sitemaps":
+        return _execute_create_static_sitemaps_task(payload)
+    if task_type == "yandex_webmaster_static_sitemaps":
+        return _execute_yandex_static_sitemaps_task(task_id, payload)
     raise ValueError(f"Unsupported task_type: {task_type}")
 
 
@@ -500,6 +506,183 @@ def _execute_indexnow_sitemap_replace_task(payload: JsonPayload | None) -> _Task
             "indexnow_queue_url_count": queue_count,
         }
     )
+
+
+def _execute_create_static_sitemaps_task(payload: JsonPayload | None) -> _TaskExecutionResult:
+    """Copy every leaf sitemap into a replaceable static XML snapshot."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("project_id"), int):
+        raise ValueError("create_static_sitemaps payload must contain project_id.")
+    project_id = payload["project_id"]
+    session = SessionFactory()
+    try:
+        project = ProjectRepository(session).get_by_id(project_id)
+        if project is None:
+            raise ValueError("Проект для статических карт не найден.")
+        project_name = project.project_name
+        sitemap_url = project.sitemap_path
+        start_url = project.start_url
+    finally:
+        session.close()
+    if not sitemap_url:
+        raise ValueError(f"В проекте «{project_name}» не заполнен sitemap.")
+    if not start_url:
+        raise ValueError(f"В проекте «{project_name}» не заполнен стартовый URL.")
+    parsed_start_url = urlsplit(start_url)
+    if not parsed_start_url.scheme or not parsed_start_url.netloc:
+        raise ValueError(f"В проекте «{project_name}» указан некорректный стартовый URL.")
+
+    source_url = urljoin(start_url, sitemap_url.strip())
+    files: dict[str, bytes] = {}
+    _collect_static_sitemap_files(url=source_url, visited=set(), files=files)
+    if not files:
+        raise ValueError("В sitemap не найдено вложенных XML-карт с URL.")
+    static_base_url = f"{parsed_start_url.scheme}://{parsed_start_url.netloc}/static_sitemap"
+    index_body = _build_static_sitemap_index(static_base_url, list(files))
+    files = {"sitemap-index.xml": index_body, **files}
+    manifest = save_static_sitemap_snapshot(
+        project_slug=slugify(project_name),
+        source_url=source_url,
+        files=files,
+    )
+    return _TaskExecutionResult(
+        result_payload={
+            "project_name": project_name,
+            "static_sitemap_count": len(manifest.files),
+            "static_sitemap_directory": str(slugify(project_name)),
+            "static_sitemap_created_at": manifest.created_at,
+        }
+    )
+
+
+def _collect_static_sitemap_files(*, url: str, visited: set[str], files: dict[str, bytes]) -> None:
+    """Recursively collect leaf urlset XML files without modifying their content."""
+
+    if url in visited:
+        return
+    visited.add(url)
+    fetched = _fetch_sitemap_url(url)
+    if not _is_xml_response(fetched.content_type):
+        raise ValueError(f"Статическая карта не похожа на XML: {url}")
+    try:
+        root = ElementTree.fromstring(fetched.body)
+    except ElementTree.ParseError as error:
+        raise ValueError(f"Не удалось разобрать XML sitemap: {url}") from error
+    sitemap_type = _detect_sitemap_type(root)
+    if sitemap_type is None:
+        raise ValueError(f"XML не является sitemap: {url}")
+    if sitemap_type == "urlset":
+        file_name = f"sitemap-{len(files) + 1:03d}.xml"
+        files[file_name] = fetched.body
+        return
+    for nested_url in _extract_sitemap_locations(root):
+        _collect_static_sitemap_files(url=nested_url, visited=visited, files=files)
+
+
+def _build_static_sitemap_index(static_base_url: str, file_names: list[str]) -> bytes:
+    """Build a small static sitemap index that points to the saved leaf maps."""
+
+    locations = "".join(
+        f"  <sitemap><loc>{xml_escape(static_base_url + '/' + file_name)}</loc></sitemap>\n"
+        for file_name in file_names
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        f"{locations}"
+        "</sitemapindex>\n"
+    ).encode("utf-8")
+
+
+def _execute_yandex_static_sitemaps_task(task_id: int, payload: JsonPayload | None) -> _TaskExecutionResult:
+    """Register all published static sitemap URLs for one Yandex Webmaster host."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("project_id"), int):
+        raise ValueError("yandex_webmaster_static_sitemaps payload must contain project_id.")
+    project_id = payload["project_id"]
+    session = SessionFactory()
+    try:
+        project = ProjectRepository(session).get_by_id(project_id)
+        if project is None:
+            raise ValueError("Проект для отправки статических карт не найден.")
+        project_name = project.project_name
+        start_url = project.start_url
+        host_id = project.yandex_webmaster_host
+    finally:
+        session.close()
+    if not start_url or not host_id:
+        raise ValueError(f"В проекте «{project_name}» нужен стартовый URL и хост Яндекс Вебмастера.")
+    parsed_start_url = urlsplit(start_url)
+    if not parsed_start_url.scheme or not parsed_start_url.netloc:
+        raise ValueError(f"В проекте «{project_name}» указан некорректный стартовый URL.")
+    manifest = read_static_sitemap_manifest(slugify(project_name))
+    if manifest is None:
+        raise ValueError(f"Для проекта «{project_name}» ещё не создана статическая карта.")
+
+    access_token = get_yandex_access_token()
+    user_id = _get_yandex_webmaster_user_id(access_token)
+    base_url = f"{parsed_start_url.scheme}://{parsed_start_url.netloc}/static_sitemap"
+    submitted_count = 0
+    errors: list[str] = []
+    for file_name in manifest.files:
+        if _is_task_cancellation_requested(task_id):
+            break
+        sitemap_url = f"{base_url}/{file_name}"
+        status_code, response_text = _send_yandex_static_sitemap(
+            access_token=access_token,
+            user_id=user_id,
+            host_id=host_id,
+            sitemap_url=sitemap_url,
+        )
+        if status_code in {200, 201, 202, 204}:
+            submitted_count += 1
+        else:
+            errors.append(f"{file_name}: {_short_api_error(status_code, response_text)}")
+    status = "completed" if not errors else "partial_error"
+    if _is_task_cancellation_requested(task_id):
+        status = "cancelled"
+    error_text = "; ".join(errors)[:1000] or None
+    report_path = append_indexing_report(
+        project_name=project_name,
+        channel="yandexwebmaster",
+        action="add_static_sitemaps",
+        page_count=submitted_count,
+        status=status,
+        error_text=error_text,
+    )
+    return _TaskExecutionResult(
+        result_payload={
+            "project_name": project_name,
+            "channel": "yandexwebmaster",
+            "action": "add_static_sitemaps",
+            "submitted_pages": submitted_count,
+            "remaining_pages": len(manifest.files) - submitted_count,
+            "indexing_status": status,
+            "indexing_error": error_text,
+        },
+        report_relative_path=str(report_path.relative_to(LocalFileStorage().root)),
+    )
+
+
+def _send_yandex_static_sitemap(
+    *, access_token: str, user_id: str, host_id: str, sitemap_url: str
+) -> tuple[int, str]:
+    """Register one sitemap URL through the Yandex Webmaster API."""
+
+    endpoint = f"https://api.webmaster.yandex.net/v4/user/{user_id}/hosts/{quote(host_id, safe='')}/user-added-sitemaps"
+    request = Request(
+        endpoint,
+        data=json.dumps({"url": sitemap_url}).encode("utf-8"),
+        headers={"Authorization": f"OAuth {access_token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            return response.status, response.read().decode("utf-8", errors="replace")
+    except HTTPError as error:
+        return error.code, error.read().decode("utf-8", errors="replace")
+    except (URLError, TimeoutError, socket.timeout) as error:
+        return 0, str(error)
 
 
 def _execute_indexnow_submit_task(task_id: int, payload: JsonPayload | None) -> _TaskExecutionResult:
