@@ -53,7 +53,7 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     restart: unless-stopped
     volumes:
-      - storage_data:/app/storage
+      - ./storage:/app/storage
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -73,7 +73,7 @@ services:
     command: uvicorn app.webhook_bot:app --host 0.0.0.0 --port 8001
     restart: unless-stopped
     volumes:
-      - storage_data:/app/storage
+      - ./storage:/app/storage
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/bot/health"]
       interval: 10s
@@ -93,7 +93,7 @@ services:
     command: sh -c "export RQ_QUEUE=crawl_default && python -m app.worker"
     restart: unless-stopped
     volumes:
-      - storage_data:/app/storage
+      - ./storage:/app/storage
 
   worker_crawl_heavy:
     build:
@@ -108,7 +108,7 @@ services:
     command: sh -c "export RQ_QUEUE=crawl_heavy && python -m app.worker"
     restart: unless-stopped
     volumes:
-      - storage_data:/app/storage
+      - ./storage:/app/storage
 
   caddy:
     image: caddy:2-alpine
@@ -131,6 +131,5 @@ services:
 volumes:
   postgres_data:
   redis_data:
-  storage_data:
   caddy_data:
   caddy_config:
