@@ -36,6 +36,7 @@ from app.interfaces.bot.keyboards import (
     build_indexnow_sitemap_projects_keyboard,
     build_indexnow_sitemap_replace_confirm_keyboard,
     build_main_menu_keyboard,
+    build_parsing_back_keyboard,
     build_parsing_actions_keyboard,
     build_parsing_settings_keyboard,
     build_project_boolean_keyboard,
@@ -291,27 +292,27 @@ async def handle_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Текущий сценарий сброшен.", reply_markup=build_main_menu_keyboard())
 
 
-@router.message(F.text == "Парсинг")
+@router.message(F.text.in_({"Парсинг", "🔎 Парсинг"}))
 async def handle_parsing_menu(message: Message) -> None:
     """Open parsing section."""
 
     await message.answer(
-        "Раздел парсинга.\nВыбери, как запускать задачу:",
+        "🔎 Парсинг\nВыбери, как запускать задачу:",
         reply_markup=build_parsing_actions_keyboard(),
     )
 
 
-@router.message(F.text == "Проекты")
+@router.message(F.text.in_({"Проекты", "📁 Проекты"}))
 async def handle_projects_menu(message: Message) -> None:
     """Open projects section."""
 
     await message.answer(
-        "Раздел проектов.\nВыбери действие ниже.",
+        "📁 Проекты\nВыбери действие ниже.",
         reply_markup=build_projects_actions_keyboard(),
     )
 
 
-@router.message(F.text == "Доступ")
+@router.message(F.text.in_({"Доступ", "👥 Доступ"}))
 async def handle_access_menu(message: Message, state: FSMContext) -> None:
     """Open bot access management section for root admins."""
 
@@ -322,38 +323,38 @@ async def handle_access_menu(message: Message, state: FSMContext) -> None:
 
     await _clear_flow_state_preserving_settings(state)
     await message.answer(
-        "Раздел доступа.\nВыбери действие ниже.",
+        "👥 Доступ\nВыбери действие ниже.",
         reply_markup=build_access_actions_keyboard(),
     )
 
 
-@router.message(F.text == "Парсинг sitemap")
+@router.message(F.text.in_({"Парсинг sitemap", "🗺 Парсинг sitemap"}))
 async def handle_sitemap_menu(message: Message) -> None:
     """Open sitemap parsing section."""
 
     await message.answer(
-        "Раздел парсинга sitemap.\nВыбери, как запускать задачу:",
+        "🗺 Парсинг sitemap\nВыбери, как запускать задачу:",
         reply_markup=build_sitemap_actions_keyboard(),
     )
 
 
-@router.message(F.text == "Индексирование")
+@router.message(F.text.in_({"Индексирование", "📤 Индексирование"}))
 async def handle_indexing_menu(message: Message, state: FSMContext) -> None:
     """Open the indexing section."""
 
     await _clear_flow_state_preserving_settings(state)
     await message.answer(
-        "Раздел индексирования.\nВыбери сервис и действие.",
+        "📤 Индексирование\nВыбери сервис и действие.",
         reply_markup=build_indexing_actions_keyboard(),
     )
 
 
-@router.message(F.text == "Статус")
+@router.message(F.text.in_({"Статус", "📊 Статус"}))
 async def handle_status_menu(message: Message) -> None:
     """Open task status section."""
 
     await message.answer(
-        "Раздел статусов.\nЗдесь можно проверить запуск или задачу.",
+        "📊 Статус\nЗдесь можно проверить запуск или задачу.",
         reply_markup=build_status_actions_keyboard(),
     )
 
@@ -365,14 +366,32 @@ async def handle_parsing_projects(callback: CallbackQuery, state: FSMContext) ->
     await callback.answer()
     projects = list_projects()
     if not projects:
-        await callback.message.answer("Список обычных проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список обычных проектов пока пуст.",
+            reply_markup=build_parsing_back_keyboard(),
+        )
         return
 
     settings = await _get_crawl_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери обычный проект для запуска парсинга.\n\n"
         f"{_format_default_project_settings(settings)}",
         reply_markup=build_project_selection_keyboard(projects),
+    )
+
+
+@router.callback_query(F.data == "parsing:back")
+async def handle_parsing_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from a parsing sub-screen to the parsing section menu."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _edit_or_answer(
+        callback.message,
+        "🔎 Парсинг\nВыбери, как запускать задачу:",
+        reply_markup=build_parsing_actions_keyboard(),
     )
 
 
@@ -460,11 +479,16 @@ async def handle_parsing_heavy_projects(callback: CallbackQuery, state: FSMConte
     await callback.answer()
     projects = list_projects(crawl_segment=CrawlSegment.HEAVY)
     if not projects:
-        await callback.message.answer("Список heavy-проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список heavy-проектов пока пуст.",
+            reply_markup=build_parsing_back_keyboard(),
+        )
         return
 
     settings = await _get_heavy_crawl_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери heavy-проект для запуска.\n\n"
         f"{_format_crawl_settings(settings)}",
         reply_markup=build_heavy_project_selection_keyboard(projects),
@@ -477,7 +501,8 @@ async def handle_parsing_adhoc(callback: CallbackQuery, state: FSMContext) -> No
 
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери, какие настройки применить к разовому запуску.",
         reply_markup=build_adhoc_profile_keyboard(),
     )
@@ -489,7 +514,8 @@ async def handle_parsing_url_list(callback: CallbackQuery, state: FSMContext) ->
 
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери, какие настройки применить к запуску по списку URL.",
         reply_markup=build_url_list_profile_keyboard(),
     )
@@ -1318,7 +1344,11 @@ async def handle_parsing_adhoc_cancel(callback: CallbackQuery, state: FSMContext
 
     await callback.answer("Отменено")
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer("Запуск по своему URL отменён.")
+    await _edit_or_answer(
+        callback.message,
+        "🔎 Парсинг\nВыбери, как запускать задачу:",
+        reply_markup=build_parsing_actions_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "parsing:adhoc:default")
@@ -1329,12 +1359,14 @@ async def handle_parsing_adhoc_default(callback: CallbackQuery, state: FSMContex
     await state.set_state(AdHocCrawlStates.waiting_for_url)
     settings = await _get_crawl_settings(state)
     await state.update_data({ADHOC_CRAWL_PROFILE_STATE_KEY: "default"})
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Отправь URL сайта для разового запуска.\n\n"
         "Пример: https://example.com\n\n"
         "Будут применены обычные настройки:\n"
         f"{_format_crawl_settings(settings)}\n\n"
-        "Для отмены отправь /cancel."
+        "Для отмены отправь /cancel.",
+        reply_markup=build_parsing_back_keyboard(),
     )
 
 
@@ -1346,12 +1378,14 @@ async def handle_parsing_adhoc_heavy(callback: CallbackQuery, state: FSMContext)
     await state.set_state(AdHocCrawlStates.waiting_for_url)
     settings = await _get_heavy_crawl_settings(state)
     await state.update_data({ADHOC_CRAWL_PROFILE_STATE_KEY: "heavy"})
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Отправь URL сайта для разового запуска.\n\n"
         "Пример: https://example.com\n\n"
         "Будут применены heavy-настройки:\n"
         f"{_format_crawl_settings(settings)}\n\n"
-        "Для отмены отправь /cancel."
+        "Для отмены отправь /cancel.",
+        reply_markup=build_parsing_back_keyboard(),
     )
 
 
@@ -1361,7 +1395,11 @@ async def handle_parsing_url_list_cancel(callback: CallbackQuery, state: FSMCont
 
     await callback.answer("Отменено")
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer("Запуск по списку URL отменён.")
+    await _edit_or_answer(
+        callback.message,
+        "🔎 Парсинг\nВыбери, как запускать задачу:",
+        reply_markup=build_parsing_actions_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "parsing:url_list:default")
@@ -1377,7 +1415,8 @@ async def handle_parsing_url_list_default(callback: CallbackQuery, state: FSMCon
             ADHOC_URL_LIST_BUFFER_STATE_KEY: [],
         }
     )
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Отправь список URL, каждый с новой строки.\n\n"
         "Если URL больше 200, лучше отправить `.txt` файл.\n"
         "Внутри файла — один URL на строку.\n\n"
@@ -1385,7 +1424,8 @@ async def handle_parsing_url_list_default(callback: CallbackQuery, state: FSMCon
         "Будут применены обычные настройки:\n"
         f"{_format_crawl_settings(settings)}\n\n"
         "Можно отправить список в несколько сообщений. Когда закончишь, нажми «Запустить список».\n\n"
-        "Для отмены отправь /cancel."
+        "Для отмены отправь /cancel.",
+        reply_markup=build_parsing_back_keyboard(),
     )
 
 
@@ -1402,7 +1442,8 @@ async def handle_parsing_url_list_heavy(callback: CallbackQuery, state: FSMConte
             ADHOC_URL_LIST_BUFFER_STATE_KEY: [],
         }
     )
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Отправь список URL, каждый с новой строки.\n\n"
         "Если URL больше 200, лучше отправить `.txt` файл.\n"
         "Внутри файла — один URL на строку.\n\n"
@@ -1410,7 +1451,8 @@ async def handle_parsing_url_list_heavy(callback: CallbackQuery, state: FSMConte
         "Будут применены heavy-настройки:\n"
         f"{_format_crawl_settings(settings)}\n\n"
         "Можно отправить список в несколько сообщений. Когда закончишь, нажми «Запустить список».\n\n"
-        "Для отмены отправь /cancel."
+        "Для отмены отправь /cancel.",
+        reply_markup=build_parsing_back_keyboard(),
     )
 
 
@@ -1422,7 +1464,8 @@ async def handle_parsing_url_list_reset(callback: CallbackQuery, state: FSMConte
     lock = _get_url_list_buffer_lock(callback.message.chat.id, callback.from_user.id)
     async with lock:
         await state.update_data({ADHOC_URL_LIST_BUFFER_STATE_KEY: []})
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Список URL очищен. Отправь новые адреса, каждый с новой строки.",
         reply_markup=build_url_list_collect_keyboard(url_count=0),
     )
@@ -1600,7 +1643,7 @@ async def handle_parsing_recent(callback: CallbackQuery) -> None:
     """Handle recent parsing launches."""
 
     await callback.answer()
-    await _send_recent_batches(callback.message)
+    await _send_recent_batches(callback.message, inline_navigation=True)
 
 
 @router.callback_query(F.data == "parsing:all")
@@ -1609,7 +1652,8 @@ async def handle_parsing_all(callback: CallbackQuery, state: FSMContext) -> None
 
     await callback.answer()
     settings = await _get_crawl_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Запустить парсинг для всех обычных проектов?\n\n"
         f"{_format_crawl_settings(settings)}\n\n"
         "Задачи будут поставлены в очередь. Если worker один, они пойдут последовательно.",
@@ -1622,7 +1666,8 @@ async def handle_parsing_stop(callback: CallbackQuery) -> None:
     """Ask for confirmation before stopping active crawl tasks."""
 
     await callback.answer()
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Остановить все активные запуски парсинга?\n\n"
         "Ожидающие задачи будут сняты с очереди, а выполняющиеся получат запрос на остановку.",
         reply_markup=build_confirm_stop_parsing_keyboard(),
@@ -1634,7 +1679,11 @@ async def handle_parsing_stop_cancel(callback: CallbackQuery) -> None:
     """Cancel stop confirmation."""
 
     await callback.answer("Отменено")
-    await callback.message.answer("Остановка парсинга отменена.")
+    await _edit_or_answer(
+        callback.message,
+        "🔎 Парсинг\nВыбери, как запускать задачу:",
+        reply_markup=build_parsing_actions_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "parsing:stop:confirm")
@@ -1656,7 +1705,11 @@ async def handle_parsing_all_cancel(callback: CallbackQuery) -> None:
     """Cancel bulk crawl confirmation."""
 
     await callback.answer("Отменено")
-    await callback.message.answer("Массовый запуск отменён.")
+    await _edit_or_answer(
+        callback.message,
+        "🔎 Парсинг\nВыбери, как запускать задачу:",
+        reply_markup=build_parsing_actions_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "parsing:all:confirm")
@@ -2526,25 +2579,38 @@ async def handle_task_status_input(message: Message, state: FSMContext) -> None:
     await _clear_flow_state_preserving_settings(state)
 
 
-async def _send_recent_batches(message: Message) -> None:
-    """Send recent launches with inline selection buttons."""
+async def _send_recent_batches(message: Message, *, inline_navigation: bool = False) -> None:
+    """Show recent launches, optionally in the parsing inline navigation flow."""
 
     recent_batches = list_recent_batches(limit=10)
     if not recent_batches:
-        await message.answer("Пока нет ни одного запуска.")
+        if inline_navigation:
+            await _edit_or_answer(
+                message,
+                "Пока нет ни одного запуска.",
+                reply_markup=build_parsing_back_keyboard(),
+            )
+        else:
+            await message.answer("Пока нет ни одного запуска.")
         return
 
-    await message.answer(
-        "Последние запуски:\nВыбери нужный запуск кнопкой ниже.",
-        reply_markup=build_recent_batches_keyboard(recent_batches),
+    text = "Последние запуски:\nВыбери нужный запуск кнопкой ниже."
+    reply_markup = build_recent_batches_keyboard(
+        recent_batches,
+        include_parsing_back=inline_navigation,
     )
+    if inline_navigation:
+        await _edit_or_answer(message, text, reply_markup=reply_markup)
+    else:
+        await message.answer(text, reply_markup=reply_markup)
 
 
 async def _send_parsing_settings(message: Message, state: FSMContext) -> None:
     """Send current crawl settings with quick inline controls."""
 
     settings = await _get_crawl_settings(state)
-    await message.answer(
+    await _edit_or_answer(
+        message,
         "Настройки обычного парсинга:\n\n"
         f"{_format_default_project_settings(settings)}\n\n"
         "Как работают кнопки ниже:\n"
