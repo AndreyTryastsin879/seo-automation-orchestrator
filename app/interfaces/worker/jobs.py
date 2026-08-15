@@ -1619,6 +1619,8 @@ def _checkpoint_crawl_progress(
     max_5xx_before_stop: int,
     retry_delay_ms: int,
     crawl_result: _CrawlRunResult,
+    new_suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow],
+    reset_suspicious_relative_link_rows: bool,
     last_processed_url: str | None,
 ) -> None:
     """Persist the latest crawl progress into the task result payload."""
@@ -1646,13 +1648,21 @@ def _checkpoint_crawl_progress(
         )
         csv_content = _build_crawl_rows_csv(crawl_result.rows)
         csv_file = _persist_partial_crawl_csv(task=task, csv_content=csv_content)
+        relative_links_csv_path = _persist_partial_relative_link_issues_csv(
+            task=task,
+            rows=new_suspicious_relative_link_rows,
+            reset=reset_suspicious_relative_link_rows,
+        )
         session.execute(
             update(Task)
             .where(Task.id == task_id)
             .values(
                 result_payload={
                     **progress_payload,
-                    "export_files": {"csv": csv_file.relative_path},
+                    "export_files": {
+                        "csv": csv_file.relative_path,
+                        "relative_link_issues_csv": relative_links_csv_path,
+                    },
                 }
             )
         )
@@ -1700,6 +1710,7 @@ async def _run_crawler(
     visited: set[str] = set(initial_urls)
     rows: list[_CrawlRow] = []
     suspicious_relative_link_rows: list[_SuspiciousRelativeLinkRow] = []
+    checkpointed_suspicious_relative_link_count = 0
     diagnostics: list[str] = []
     lock = asyncio.Lock()
 
@@ -1783,6 +1794,7 @@ async def _run_crawler(
     async def worker() -> None:
         nonlocal pages_crawled, pages_discovered, query_links_seen, robots_filtered_links
         nonlocal total_5xx_responses, limit_reached, stop_due_to_5xx
+        nonlocal checkpointed_suspicious_relative_link_count
 
         while True:
             if await asyncio.to_thread(_is_task_cancellation_requested, task_id):
@@ -1848,6 +1860,14 @@ async def _run_crawler(
 
                     should_checkpoint = pages_crawled % CRAWL_PROGRESS_CHECKPOINT_EVERY_PAGES == 0
                     checkpoint_result = build_checkpoint_crawl_result() if should_checkpoint else None
+                    if checkpoint_result is not None:
+                        new_suspicious_relative_link_rows = list(
+                            suspicious_relative_link_rows[checkpointed_suspicious_relative_link_count:]
+                        )
+                        checkpointed_suspicious_relative_link_count = len(suspicious_relative_link_rows)
+                        reset_suspicious_relative_link_rows = (
+                            pages_crawled == CRAWL_PROGRESS_CHECKPOINT_EVERY_PAGES
+                        )
 
                 for discovered_item in urls_to_enqueue:
                     await queue.put(discovered_item)
@@ -1867,6 +1887,8 @@ async def _run_crawler(
                         max_5xx_before_stop=max_5xx_before_stop,
                         retry_delay_ms=retry_delay_ms,
                         crawl_result=checkpoint_result,
+                        new_suspicious_relative_link_rows=new_suspicious_relative_link_rows,
+                        reset_suspicious_relative_link_rows=reset_suspicious_relative_link_rows,
                         last_processed_url=page_result.row.final_url,
                     )
             finally:
@@ -2387,6 +2409,29 @@ def _persist_partial_crawl_csv(*, task: Task, csv_content: str):
     csv_relative_path = f"crawl/{project_slug}.csv"
     storage = LocalFileStorage()
     return storage.write_text(csv_relative_path, csv_content, encoding="utf-8")
+
+
+def _persist_partial_relative_link_issues_csv(
+    *,
+    task: Task,
+    rows: list[_SuspiciousRelativeLinkRow],
+    reset: bool,
+) -> str:
+    """Append checkpointed relative-link diagnostics beside the current crawl CSV."""
+
+    project_slug = _resolve_task_slug(task)
+    relative_path = f"crawl/{project_slug}.relative_link_issues.csv"
+    storage = LocalFileStorage()
+    target_path = storage.root / relative_path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mode = "w" if reset else "a"
+    with target_path.open(mode, encoding="utf-8", newline="") as file:
+        writer = csv.writer(file)
+        if reset:
+            writer.writerow(["Источник", "Исходный href", "Получившийся URL"])
+        writer.writerows([row.source_url, row.href, row.url] for row in rows)
+    return relative_path
 
 
 def _upsert_task_file(

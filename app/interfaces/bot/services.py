@@ -1381,12 +1381,22 @@ def get_task_status(task_id: int) -> TaskStatusResult | None:
         preferred_xlsx_path: Path | None = None
         preferred_csv_path: Path | None = None
         preferred_csv_relative_path: str | None = None
+        relative_link_issues_csv_path: Path | None = None
         for task_file in task_files:
             if task_file.file_path.lower().endswith(".xlsx"):
                 preferred_xlsx_path = storage_root / task_file.file_path
             elif task_file.file_path.lower().endswith(".csv") and preferred_csv_path is None:
                 preferred_csv_path = storage_root / task_file.file_path
                 preferred_csv_relative_path = task_file.file_path
+
+        result_payload = task.result_payload if isinstance(task.result_payload, dict) else {}
+        export_files = result_payload.get("export_files")
+        if isinstance(export_files, dict):
+            raw_relative_link_issues_path = export_files.get("relative_link_issues_csv")
+            if isinstance(raw_relative_link_issues_path, str):
+                candidate_path = storage_root / raw_relative_link_issues_path
+                if candidate_path.exists():
+                    relative_link_issues_csv_path = candidate_path
 
         if (
             preferred_csv_path is not None
@@ -1396,6 +1406,9 @@ def get_task_status(task_id: int) -> TaskStatusResult | None:
                 preferred_xlsx_path is None
                 or not preferred_xlsx_path.exists()
                 or preferred_csv_path.stat().st_mtime > preferred_xlsx_path.stat().st_mtime
+                # A legacy one-sheet checkpoint XLSX may have been generated after
+                # its CSV. Rebuild whenever the diagnostics sidecar is available.
+                or relative_link_issues_csv_path is not None
             )
         ):
             preferred_xlsx_path = _ensure_partial_xlsx_from_csv(
@@ -1403,6 +1416,7 @@ def get_task_status(task_id: int) -> TaskStatusResult | None:
                 task=task,
                 csv_absolute_path=preferred_csv_path,
                 csv_relative_path=preferred_csv_relative_path,
+                relative_link_issues_csv_path=relative_link_issues_csv_path,
             )
 
         return TaskStatusResult(task=task, xlsx_path=preferred_xlsx_path, csv_path=preferred_csv_path)
@@ -1906,6 +1920,7 @@ def _ensure_partial_xlsx_from_csv(
     task: TaskDTO | Task,
     csv_absolute_path: Path,
     csv_relative_path: str,
+    relative_link_issues_csv_path: Path | None,
 ) -> Path | None:
     """Build and register a partial XLSX export from an existing crawl CSV."""
 
@@ -1914,10 +1929,15 @@ def _ensure_partial_xlsx_from_csv(
 
     xlsx_relative_path = str(Path(csv_relative_path).with_suffix(".xlsx"))
     rows = _parse_csv_rows(csv_absolute_path.read_text(encoding="utf-8"))
+    relative_link_issue_rows = (
+        _parse_csv_rows(relative_link_issues_csv_path.read_text(encoding="utf-8"))
+        if relative_link_issues_csv_path is not None
+        else [["Источник", "Исходный href", "Получившийся URL"]]
+    )
     storage = LocalFileStorage()
     xlsx_file = storage.write_bytes(
         xlsx_relative_path,
-        _build_xlsx_bytes_from_rows(rows),
+        _build_xlsx_bytes_from_rows(rows, relative_link_issue_rows),
     )
 
     repository = TaskFileRepository(session)
@@ -1955,8 +1975,10 @@ def _parse_csv_rows(csv_content: str) -> list[list[str]]:
     return [list(row) for row in reader]
 
 
-def _build_xlsx_bytes_from_rows(rows: list[list[str]]) -> bytes:
-    """Build XLSX bytes from parsed CSV rows."""
+def _build_xlsx_bytes_from_rows(
+    rows: list[list[str]], relative_link_issue_rows: list[list[str]]
+) -> bytes:
+    """Build a checkpoint XLSX with crawl and relative-link worksheets."""
 
     from openpyxl import Workbook
 
@@ -1964,6 +1986,10 @@ def _build_xlsx_bytes_from_rows(rows: list[list[str]]) -> bytes:
     worksheet = workbook.create_sheet(title="crawl_pages")
     for row in rows:
         worksheet.append(list(row))
+
+    diagnostics_worksheet = workbook.create_sheet(title="relative_link_issues")
+    for row in relative_link_issue_rows:
+        diagnostics_worksheet.append(list(row))
 
     buffer = io.BytesIO()
     workbook.save(buffer)
