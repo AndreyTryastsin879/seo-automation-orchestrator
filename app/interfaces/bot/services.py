@@ -1381,7 +1381,6 @@ def get_task_status(task_id: int) -> TaskStatusResult | None:
         preferred_xlsx_path: Path | None = None
         preferred_csv_path: Path | None = None
         preferred_csv_relative_path: str | None = None
-        relative_link_issues_csv_path: Path | None = None
         for task_file in task_files:
             if task_file.file_path.lower().endswith(".xlsx"):
                 preferred_xlsx_path = storage_root / task_file.file_path
@@ -1389,26 +1388,20 @@ def get_task_status(task_id: int) -> TaskStatusResult | None:
                 preferred_csv_path = storage_root / task_file.file_path
                 preferred_csv_relative_path = task_file.file_path
 
-        result_payload = task.result_payload if isinstance(task.result_payload, dict) else {}
-        export_files = result_payload.get("export_files")
-        if isinstance(export_files, dict):
-            raw_relative_link_issues_path = export_files.get("relative_link_issues_csv")
-            if isinstance(raw_relative_link_issues_path, str):
-                candidate_path = storage_root / raw_relative_link_issues_path
-                if candidate_path.exists():
-                    relative_link_issues_csv_path = candidate_path
+        relative_link_issues_csv_path = _find_relative_link_issues_csv_path(
+            storage_root=storage_root,
+            csv_relative_path=preferred_csv_relative_path,
+            result_payload=task.result_payload,
+        )
 
         if (
             preferred_csv_path is not None
             and preferred_csv_relative_path is not None
             and task.task_type == "crawl_site"
-            and (
-                preferred_xlsx_path is None
-                or not preferred_xlsx_path.exists()
-                or preferred_csv_path.stat().st_mtime > preferred_xlsx_path.stat().st_mtime
-                # A legacy one-sheet checkpoint XLSX may have been generated after
-                # its CSV. Rebuild whenever the diagnostics sidecar is available.
-                or relative_link_issues_csv_path is not None
+            and _should_rebuild_partial_crawl_xlsx(
+                csv_path=preferred_csv_path,
+                relative_link_issues_csv_path=relative_link_issues_csv_path,
+                xlsx_path=preferred_xlsx_path,
             )
         ):
             preferred_xlsx_path = _ensure_partial_xlsx_from_csv(
@@ -1422,6 +1415,48 @@ def get_task_status(task_id: int) -> TaskStatusResult | None:
         return TaskStatusResult(task=task, xlsx_path=preferred_xlsx_path, csv_path=preferred_csv_path)
     finally:
         session.close()
+
+
+def _find_relative_link_issues_csv_path(
+    *,
+    storage_root: Path,
+    csv_relative_path: str | None,
+    result_payload: object,
+) -> Path | None:
+    """Locate crawl diagnostics from its payload or beside the crawl CSV."""
+
+    payload = result_payload if isinstance(result_payload, dict) else {}
+    export_files = payload.get("export_files")
+    if isinstance(export_files, dict):
+        configured_path = export_files.get("relative_link_issues_csv")
+        if isinstance(configured_path, str):
+            candidate_path = storage_root / configured_path
+            if candidate_path.exists():
+                return candidate_path
+
+    if csv_relative_path is None:
+        return None
+    sidecar_path = storage_root / Path(csv_relative_path).with_suffix(".relative_link_issues.csv")
+    return sidecar_path if sidecar_path.exists() else None
+
+
+def _should_rebuild_partial_crawl_xlsx(
+    *,
+    csv_path: Path,
+    relative_link_issues_csv_path: Path | None,
+    xlsx_path: Path | None,
+) -> bool:
+    """Rebuild a partial crawl XLSX only when an input is newer or it is absent."""
+
+    if xlsx_path is None or not xlsx_path.exists():
+        return True
+    xlsx_mtime = xlsx_path.stat().st_mtime
+    if csv_path.stat().st_mtime > xlsx_mtime:
+        return True
+    return (
+        relative_link_issues_csv_path is not None
+        and relative_link_issues_csv_path.stat().st_mtime > xlsx_mtime
+    )
 
 
 def cancel_active_crawl_tasks() -> CancelCrawlTasksResult:

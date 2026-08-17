@@ -397,7 +397,13 @@ def execute_task(task_id: int) -> None:
         session.rollback()
 
         if task_exists:
-            partial_result_payload = None
+            latest_task = session.get(Task, task_id)
+            if latest_task is not None:
+                session.refresh(latest_task)
+            partial_result_payload = _resolve_failure_result_payload(
+                error,
+                latest_task.result_payload if latest_task is not None else None,
+            )
             if isinstance(error, _TaskCancellationWithResultError):
                 execution_result = error.execution_result
                 if task is not None and task.task_type in {"fetch_sitemap", "fetch_robots"}:
@@ -452,6 +458,17 @@ def execute_task(task_id: int) -> None:
 
     finally:
         session.close()
+
+
+def _resolve_failure_result_payload(
+    error: Exception,
+    latest_result_payload: JsonPayload | None,
+) -> JsonPayload | None:
+    """Keep the latest checkpoint payload unless cancellation produced a final result."""
+
+    if isinstance(error, _TaskCancellationWithResultError):
+        return error.execution_result.result_payload
+    return latest_result_payload
 
 
 def _execute_by_type(task_id: int, task_type: str, payload: JsonPayload | None) -> _TaskExecutionResult:
