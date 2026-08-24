@@ -119,9 +119,9 @@ class ParsingNavigationKeyboardTests(unittest.TestCase):
                 "🔎 Парсинг",
                 "🗺 Парсинг sitemap",
                 "📤 Индексирование",
+                "🧾 Аудит сайта",
                 "📁 Проекты",
                 "📊 Статус",
-                "🧾 Аудит сайта",
                 "👥 Доступ",
             ],
         )

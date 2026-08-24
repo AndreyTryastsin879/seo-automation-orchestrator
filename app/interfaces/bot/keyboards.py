@@ -38,8 +38,8 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="🔎 Парсинг"), KeyboardButton(text="🗺 Парсинг sitemap")],
             [KeyboardButton(text="📤 Индексирование")],
-            [KeyboardButton(text="📁 Проекты"), KeyboardButton(text="📊 Статус")],
             [KeyboardButton(text="🧾 Аудит сайта")],
+            [KeyboardButton(text="📁 Проекты"), KeyboardButton(text="📊 Статус")],
             [KeyboardButton(text="👥 Доступ")],
         ],
         resize_keyboard=True,
