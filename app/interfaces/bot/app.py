@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.redis import RedisStorage
@@ -17,9 +19,10 @@ def create_bot() -> Bot:
     settings = get_settings()
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN environment variable is not set.")
-    session = None
-    if settings.bot_proxy:
-        session = AiohttpSession(proxy=settings.bot_proxy)
+    session = AiohttpSession(proxy=settings.bot_proxy) if settings.bot_proxy else AiohttpSession()
+    if not settings.bot_proxy:
+        # The production VPS has an unavailable IPv6 route to Telegram API.
+        session._connector_init["family"] = socket.AF_INET
     return Bot(token=settings.bot_token, session=session)
 
 
