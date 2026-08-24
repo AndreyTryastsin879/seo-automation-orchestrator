@@ -499,6 +499,14 @@ def build_status_actions_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def build_status_back_keyboard() -> InlineKeyboardMarkup:
+    """Build a return action for status input prompts."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="← Назад", callback_data="status:back")
+    return builder.as_markup()
+
+
 def build_project_selection_keyboard(projects: list[ProjectDTO]) -> InlineKeyboardMarkup:
     """Build an inline keyboard for choosing a project to crawl."""
 
@@ -615,7 +623,7 @@ def build_recent_tasks_keyboard(tasks: list[RecentTaskSummary]) -> InlineKeyboar
 
 
 def build_recent_batches_keyboard(
-    batches: list[RecentBatchSummary], *, include_parsing_back: bool = False
+    batches: list[RecentBatchSummary], *, include_parsing_back: bool = False, back_callback: str | None = None
 ) -> InlineKeyboardMarkup:
     """Build an inline keyboard for recent launches."""
 
@@ -628,7 +636,9 @@ def build_recent_batches_keyboard(
             ),
             callback_data=f"recent:batch:{batch.batch_id}",
         )
-    if include_parsing_back:
+    if back_callback is not None:
+        builder.button(text="← Назад", callback_data=back_callback)
+    elif include_parsing_back:
         builder.button(text="← Назад", callback_data="parsing:back")
     builder.adjust(1)
     return builder.as_markup()

@@ -32,6 +32,7 @@ from app.interfaces.bot.keyboards import (
     build_sitemap_settings_keyboard,
     build_static_sitemap_actions_keyboard,
     build_static_sitemap_projects_keyboard,
+    build_status_back_keyboard,
     build_url_list_collect_keyboard,
     build_url_list_profile_keyboard,
     build_yandex_recrawl_project_keyboard,
@@ -154,3 +155,20 @@ class ParsingNavigationKeyboardTests(unittest.TestCase):
 
         for keyboard, callback_data in keyboards_and_callbacks:
             self.assertIn(callback_data, _callback_data(keyboard))
+
+    def test_status_input_prompt_has_a_back_callback(self) -> None:
+        self.assertIn("status:back", _callback_data(build_status_back_keyboard()))
+
+    def test_status_recent_launches_can_return_to_status_menu(self) -> None:
+        batch = SimpleNamespace(
+            batch_id=1,
+            title="Example",
+            status="pending",
+            finished_tasks=0,
+            total_tasks=1,
+        )
+
+        self.assertIn(
+            "status:back",
+            _callback_data(build_recent_batches_keyboard([batch], back_callback="status:back")),
+        )

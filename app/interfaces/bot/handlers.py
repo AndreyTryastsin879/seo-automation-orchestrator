@@ -56,6 +56,7 @@ from app.interfaces.bot.keyboards import (
     build_sitemap_settings_keyboard,
     build_static_sitemap_actions_keyboard,
     build_static_sitemap_projects_keyboard,
+    build_status_back_keyboard,
     build_yandex_recrawl_collect_keyboard,
     build_yandex_recrawl_project_keyboard,
     build_yandex_recrawl_projects_keyboard,
@@ -387,7 +388,14 @@ async def _show_projects_actions(message: Message) -> None:
 async def handle_status_menu(message: Message) -> None:
     """Open task status section."""
 
-    await message.answer(
+    await _show_status_actions(message)
+
+
+async def _show_status_actions(message: Message) -> None:
+    """Render the status section root in the current message."""
+
+    await _edit_or_answer(
+        message,
         "📊 Статус\nЗдесь можно проверить запуск или задачу.",
         reply_markup=build_status_actions_keyboard(),
     )
@@ -1842,7 +1850,7 @@ async def handle_parsing_recent(callback: CallbackQuery) -> None:
     """Handle recent parsing launches."""
 
     await callback.answer()
-    await _send_recent_batches(callback.message, inline_navigation=True)
+    await _send_recent_batches(callback.message, back_callback="parsing:back")
 
 
 @router.callback_query(F.data == "parsing:all")
@@ -2268,17 +2276,24 @@ async def handle_status_callbacks(callback: CallbackQuery, state: FSMContext) ->
     """Handle task status callbacks."""
 
     await callback.answer()
+    if callback.data == "status:back":
+        await _clear_flow_state_preserving_settings(state)
+        await _show_status_actions(callback.message)
+        return
+
     if callback.data == "status:by_id":
         await state.set_state(TaskStatusStates.waiting_for_task_id)
-        await callback.message.answer(
+        await _edit_or_answer(
+            callback.message,
             "Отправь task_id, который нужно проверить.\n\n"
             "Пример: 80\n\n"
             "Для отмены отправь /cancel.",
+            reply_markup=build_status_back_keyboard(),
         )
         return
 
     if callback.data == "status:recent":
-        await _send_recent_batches(callback.message)
+        await _send_recent_batches(callback.message, back_callback="status:back")
         return
 
     await callback.message.answer("Сценарий пока не реализован.")
@@ -2808,16 +2823,16 @@ async def handle_task_status_input(message: Message, state: FSMContext) -> None:
     await _clear_flow_state_preserving_settings(state)
 
 
-async def _send_recent_batches(message: Message, *, inline_navigation: bool = False) -> None:
-    """Show recent launches, optionally in the parsing inline navigation flow."""
+async def _send_recent_batches(message: Message, *, back_callback: str | None = None) -> None:
+    """Show recent launches, optionally as an inline navigation screen."""
 
     recent_batches = list_recent_batches(limit=10)
     if not recent_batches:
-        if inline_navigation:
+        if back_callback is not None:
             await _edit_or_answer(
                 message,
                 "Пока нет ни одного запуска.",
-                reply_markup=build_parsing_back_keyboard(),
+                reply_markup=build_recent_batches_keyboard([], back_callback=back_callback),
             )
         else:
             await message.answer("Пока нет ни одного запуска.")
@@ -2826,9 +2841,9 @@ async def _send_recent_batches(message: Message, *, inline_navigation: bool = Fa
     text = "Последние запуски:\nВыбери нужный запуск кнопкой ниже."
     reply_markup = build_recent_batches_keyboard(
         recent_batches,
-        include_parsing_back=inline_navigation,
+        back_callback=back_callback,
     )
-    if inline_navigation:
+    if back_callback is not None:
         await _edit_or_answer(message, text, reply_markup=reply_markup)
     else:
         await message.answer(text, reply_markup=reply_markup)
