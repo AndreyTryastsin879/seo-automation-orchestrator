@@ -126,6 +126,14 @@ def build_sitemap_actions_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def build_sitemap_back_keyboard() -> InlineKeyboardMarkup:
+    """Build a return action for sitemap input prompts."""
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="← Назад", callback_data="sitemap:back")
+    return builder.as_markup()
+
+
 def build_indexing_actions_keyboard() -> InlineKeyboardMarkup:
     """Build the first-level indexing actions."""
 
@@ -143,6 +151,7 @@ def build_yandex_webmaster_actions_keyboard() -> InlineKeyboardMarkup:
 
     builder = InlineKeyboardBuilder()
     builder.button(text="📤 Отправить на переобход", callback_data="indexing:yandex:recrawl")
+    builder.button(text="← Назад", callback_data="indexing:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -154,6 +163,7 @@ def build_indexnow_actions_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="📤 Отправить URL", callback_data="indexing:indexnow:submit")
     builder.button(text="🗺 Заполнить очереди из sitemap", callback_data="indexing:indexnow:sitemap")
     builder.button(text="🔑 Настроить ключ", callback_data="indexing:indexnow:settings")
+    builder.button(text="← Назад", callback_data="indexing:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -164,6 +174,7 @@ def build_static_sitemap_actions_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🗺 Создать статическую карту", callback_data="indexing:static:create")
     builder.button(text="📤 Отправить карты в Яндекс Вебмастер", callback_data="indexing:static:send")
+    builder.button(text="← Назад", callback_data="indexing:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -187,6 +198,7 @@ def build_static_sitemap_projects_keyboard(
         )
     all_label = "🗺 Сделать всем" if action == "create" else "📤 Отправить все"
     builder.button(text=all_label, callback_data=f"indexing:static:{action}:all")
+    builder.button(text="← Назад", callback_data="indexing:static:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -202,6 +214,7 @@ def build_indexnow_sitemap_projects_keyboard(projects: list[IndexNowSitemapProje
             callback_data=f"indexing:indexnow:sitemap:project:{summary.project.id}",
         )
     builder.button(text="🗺 Заполнить все очереди", callback_data="indexing:indexnow:sitemap:all")
+    builder.button(text="← Назад", callback_data="indexing:indexnow:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -212,7 +225,7 @@ def build_indexnow_sitemap_replace_confirm_keyboard(project_ids: list[int]) -> I
     target = "all" if len(project_ids) != 1 else str(project_ids[0])
     builder = InlineKeyboardBuilder()
     builder.button(text="✅ Заменить очередь", callback_data=f"indexing:indexnow:sitemap:confirm:{target}")
-    builder.button(text="← Назад", callback_data="indexing:indexnow:sitemap:cancel")
+    builder.button(text="← Назад", callback_data="indexing:indexnow:sitemap:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -229,6 +242,7 @@ def build_indexnow_projects_keyboard(projects: list[IndexNowProjectSummary], *, 
         )
     if mode == "submit":
         builder.button(text="📤 Отправить все", callback_data="indexing:indexnow:submit:all")
+    builder.button(text="← Назад", callback_data="indexing:indexnow:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -239,6 +253,7 @@ def build_indexnow_key_mode_keyboard(project_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✨ Создать новый ключ", callback_data=f"indexing:indexnow:key:create:{project_id}")
     builder.button(text="🔑 Ввести существующий ключ", callback_data=f"indexing:indexnow:key:enter:{project_id}")
+    builder.button(text="← Назад", callback_data="indexing:indexnow:settings:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -250,6 +265,7 @@ def build_indexnow_project_keyboard(project_id: int, *, queue_count: int) -> Inl
     builder.button(text=f"📤 Отправить сейчас ({queue_count})", callback_data=f"indexing:indexnow:send:{project_id}")
     builder.button(text="⬆️ Добавить URL в начало", callback_data=f"indexing:indexnow:add:first:{project_id}")
     builder.button(text="⬇️ Добавить URL в конец", callback_data=f"indexing:indexnow:add:last:{project_id}")
+    builder.button(text="← Назад", callback_data="indexing:indexnow:submit:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -270,6 +286,8 @@ def build_yandex_token_actions_keyboard() -> InlineKeyboardMarkup:
 
     builder = InlineKeyboardBuilder()
     builder.button(text="🔑 Обновить токен", callback_data="indexing:yandex:connection:update")
+    builder.button(text="← Назад", callback_data="indexing:back")
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -284,6 +302,7 @@ def build_yandex_recrawl_projects_keyboard(projects: list[YandexRecrawlProjectSu
             callback_data=f"indexing:yandex:project:{summary.project.id}",
         )
     builder.button(text="📤 Отправить все", callback_data="indexing:yandex:all")
+    builder.button(text="← Назад", callback_data="indexing:yandex:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -295,6 +314,7 @@ def build_yandex_recrawl_project_keyboard(project_id: int, *, queue_count: int) 
     builder.button(text=f"📤 Отправить сейчас ({queue_count})", callback_data=f"indexing:yandex:send:{project_id}")
     builder.button(text="⬆️ Добавить URL в начало", callback_data=f"indexing:yandex:add:first:{project_id}")
     builder.button(text="⬇️ Добавить URL в конец", callback_data=f"indexing:yandex:add:last:{project_id}")
+    builder.button(text="← Назад", callback_data="indexing:yandex:recrawl:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -328,6 +348,7 @@ def build_sitemap_settings_keyboard(
         text=f"Добавить в очередь на переобход: {queue_state_text}",
         callback_data="sitemap:settings:toggle:replace_yandex_recrawl_queue",
     )
+    builder.button(text="← Назад", callback_data="sitemap:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -338,6 +359,7 @@ def build_sitemap_robots_actions_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📁 Выбрать проект", callback_data="sitemap:robots:projects")
     builder.button(text="🌐 Свой URL", callback_data="sitemap:robots:adhoc")
+    builder.button(text="← Назад", callback_data="sitemap:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -383,6 +405,7 @@ def build_projects_list_keyboard(projects: list[ProjectDTO], *, mode: str = "vie
     builder = InlineKeyboardBuilder()
     for project in projects:
         builder.button(text=project.project_name, callback_data=f"projects:{mode}:{project.id}")
+    builder.button(text="← Назад", callback_data="projects:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -393,6 +416,7 @@ def build_project_card_keyboard(project_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="✏️ Изменить поле", callback_data=f"projects:fields:{project_id}")
     builder.button(text="🗑 Удалить", callback_data=f"projects:delete:{project_id}")
+    builder.button(text="← Назад", callback_data="projects:list")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -417,6 +441,7 @@ def build_project_fields_keyboard(project_id: int) -> InlineKeyboardMarkup:
     )
     for label, field_name in fields:
         builder.button(text=label, callback_data=f"projects:field:{project_id}:{field_name}")
+    builder.button(text="← Назад", callback_data=f"projects:view:{project_id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -500,6 +525,7 @@ def build_sitemap_project_selection_keyboard(projects: list[ProjectDTO]) -> Inli
             callback_data=f"sitemap:project:{project.id}",
         )
     builder.button(text="🚀 Парсить все", callback_data="sitemap:all")
+    builder.button(text="← Назад", callback_data="sitemap:back")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -514,6 +540,7 @@ def build_robots_project_selection_keyboard(projects: list[ProjectDTO]) -> Inlin
             text=f"{project.project_name}{suffix}",
             callback_data=f"sitemap:robots:project:{project.id}",
         )
+    builder.button(text="← Назад", callback_data="sitemap:robots:back")
     builder.adjust(1)
     return builder.as_markup()
 

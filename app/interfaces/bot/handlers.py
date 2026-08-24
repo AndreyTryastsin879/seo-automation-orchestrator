@@ -50,6 +50,7 @@ from app.interfaces.bot.keyboards import (
     build_recent_batches_keyboard,
     build_recent_tasks_keyboard,
     build_sitemap_actions_keyboard,
+    build_sitemap_back_keyboard,
     build_sitemap_project_selection_keyboard,
     build_sitemap_robots_actions_keyboard,
     build_sitemap_settings_keyboard,
@@ -306,7 +307,8 @@ async def handle_parsing_menu(message: Message) -> None:
 async def handle_projects_menu(message: Message) -> None:
     """Open projects section."""
 
-    await message.answer(
+    await _edit_or_answer(
+        message,
         "📁 Проекты\nВыбери действие ниже.",
         reply_markup=build_projects_actions_keyboard(),
     )
@@ -332,7 +334,8 @@ async def handle_access_menu(message: Message, state: FSMContext) -> None:
 async def handle_sitemap_menu(message: Message) -> None:
     """Open sitemap parsing section."""
 
-    await message.answer(
+    await _edit_or_answer(
+        message,
         "🗺 Парсинг sitemap\nВыбери, как запускать задачу:",
         reply_markup=build_sitemap_actions_keyboard(),
     )
@@ -343,9 +346,40 @@ async def handle_indexing_menu(message: Message, state: FSMContext) -> None:
     """Open the indexing section."""
 
     await _clear_flow_state_preserving_settings(state)
-    await message.answer(
+    await _edit_or_answer(
+        message,
         "📤 Индексирование\nВыбери сервис и действие.",
         reply_markup=build_indexing_actions_keyboard(),
+    )
+
+
+async def _show_sitemap_actions(message: Message) -> None:
+    """Render the sitemap section root in the current message."""
+
+    await _edit_or_answer(
+        message,
+        "🗺 Парсинг sitemap\nВыбери, как запускать задачу:",
+        reply_markup=build_sitemap_actions_keyboard(),
+    )
+
+
+async def _show_indexing_actions(message: Message) -> None:
+    """Render the indexing section root in the current message."""
+
+    await _edit_or_answer(
+        message,
+        "📤 Индексирование\nВыбери сервис и действие.",
+        reply_markup=build_indexing_actions_keyboard(),
+    )
+
+
+async def _show_projects_actions(message: Message) -> None:
+    """Render the projects section root in the current message."""
+
+    await _edit_or_answer(
+        message,
+        "📁 Проекты\nВыбери действие ниже.",
+        reply_markup=build_projects_actions_keyboard(),
     )
 
 
@@ -529,15 +563,29 @@ async def handle_sitemap_projects(callback: CallbackQuery, state: FSMContext) ->
     await _clear_flow_state_preserving_settings(state)
     projects = [project for project in list_all_projects() if project.sitemap_path]
     if not projects:
-        await callback.message.answer("Нет проектов с заполненным sitemap.")
+        await _edit_or_answer(
+            callback.message,
+            "Нет проектов с заполненным sitemap.",
+            reply_markup=build_sitemap_actions_keyboard(),
+        )
         return
 
     projects.sort(key=lambda project: (project.crawl_segment == CrawlSegment.HEAVY, project.project_name.lower()))
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери проект для парсинга sitemap.\n\n"
         "Список включает обычные и heavy-проекты. Кнопка «Парсить все» сначала запустит обычные, потом heavy.",
         reply_markup=build_sitemap_project_selection_keyboard(projects),
     )
+
+
+@router.callback_query(F.data == "sitemap:back")
+async def handle_sitemap_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from a sitemap sub-screen to its section root."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _show_sitemap_actions(callback.message)
 
 
 @router.callback_query(F.data == "indexing:yandex")
@@ -546,7 +594,8 @@ async def handle_yandex_indexing_menu(callback: CallbackQuery, state: FSMContext
 
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Яндекс Вебмастер.\nВыбери действие.",
         reply_markup=build_yandex_webmaster_actions_keyboard(),
     )
@@ -558,7 +607,8 @@ async def handle_indexnow_menu(callback: CallbackQuery, state: FSMContext) -> No
 
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "IndexNow.\n\n"
         "Отправляет URL в Яндекс и другие подключенные поисковые системы. "
         "Для каждого сайта нужен ключевой `.txt` файл, размещённый на самом сайте.",
@@ -572,13 +622,23 @@ async def handle_static_sitemap_menu(callback: CallbackQuery, state: FSMContext)
 
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Статические карты.\n\n"
         "Создай свежую копию XML-карт проекта, затем загрузи XML-файлы из папки "
         "`storage/static_sitemaps/<slug>/` на сайт в `/static_sitemap/`.\n\n"
         "После загрузки карт можно отправить их адреса в Яндекс Вебмастер.",
         reply_markup=build_static_sitemap_actions_keyboard(),
     )
+
+
+@router.callback_query(F.data == "indexing:back")
+async def handle_indexing_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from an indexing sub-screen to the section root."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _show_indexing_actions(callback.message)
 
 
 @router.callback_query(F.data.in_({"indexing:static:create", "indexing:static:send"}))
@@ -590,7 +650,11 @@ async def handle_static_sitemap_projects(callback: CallbackQuery, state: FSMCont
     action = callback.data.rsplit(":", 1)[-1]
     projects = list_static_sitemap_projects()
     if not projects:
-        await callback.message.answer("Список проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список проектов пока пуст.",
+            reply_markup=build_static_sitemap_actions_keyboard(),
+        )
         return
     if action == "create":
         text = (
@@ -603,7 +667,8 @@ async def handle_static_sitemap_projects(callback: CallbackQuery, state: FSMCont
             "Перед запуском файлы должны быть загружены на сайт в `/static_sitemap/`. "
             "В строке показаны число карт и готовность хоста Яндекс Вебмастера."
         )
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         text,
         reply_markup=build_static_sitemap_projects_keyboard(projects, action=action),
     )
@@ -615,6 +680,14 @@ async def handle_static_sitemap_launch(callback: CallbackQuery, state: FSMContex
 
     await callback.answer()
     parts = callback.data.split(":")
+    if callback.data == "indexing:static:back":
+        await _clear_flow_state_preserving_settings(state)
+        await _edit_or_answer(
+            callback.message,
+            "Статические карты.\n\nВыбери действие.",
+            reply_markup=build_static_sitemap_actions_keyboard(),
+        )
+        return
     if len(parts) not in {4, 5} or parts[2] not in {"create", "send"}:
         await callback.message.answer("Не удалось определить действие со статическими картами.")
         return
@@ -672,9 +745,14 @@ async def handle_indexnow_submit_projects(callback: CallbackQuery, state: FSMCon
     await _clear_flow_state_preserving_settings(state)
     projects = list_indexnow_projects()
     if not projects:
-        await callback.message.answer("Список проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список проектов пока пуст.",
+            reply_markup=build_indexnow_actions_keyboard(),
+        )
         return
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери проект.\n\n"
         "В строке показано число URL в очереди и наличие ключа IndexNow.",
         reply_markup=build_indexnow_projects_keyboard(projects, mode="submit"),
@@ -689,13 +767,44 @@ async def handle_indexnow_sitemap_projects(callback: CallbackQuery, state: FSMCo
     await _clear_flow_state_preserving_settings(state)
     projects = list_indexnow_sitemap_projects()
     if not projects:
-        await callback.message.answer("Список проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список проектов пока пуст.",
+            reply_markup=build_indexnow_actions_keyboard(),
+        )
         return
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Полное заполнение очереди из sitemap.\n\n"
         "Будет взят готовый CSV из `storage/sitemap_parsing` и полностью заменит текущую очередь IndexNow проекта. "
         "Ручные URL в этой очереди будут удалены.",
         reply_markup=build_indexnow_sitemap_projects_keyboard(projects),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:back")
+async def handle_indexnow_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from an IndexNow child screen to its action menu."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _edit_or_answer(
+        callback.message,
+        "IndexNow.\n\nВыбери действие.",
+        reply_markup=build_indexnow_actions_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:sitemap:back")
+async def handle_indexnow_sitemap_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from sitemap replacement confirmation to the IndexNow menu."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _edit_or_answer(
+        callback.message,
+        "IndexNow.\n\nВыбери действие.",
+        reply_markup=build_indexnow_actions_keyboard(),
     )
 
 
@@ -716,7 +825,8 @@ async def handle_indexnow_sitemap_project_confirm(callback: CallbackQuery) -> No
     if not summary.has_sitemap_export:
         await callback.message.answer("Для этого проекта ещё нет CSV результата парсинга sitemap.")
         return
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         f"Заменить очередь IndexNow проекта «{summary.project.project_name}» полным последним sitemap?\n\n"
         "Текущие URL в очереди будут удалены.",
         reply_markup=build_indexnow_sitemap_replace_confirm_keyboard([project_id]),
@@ -732,7 +842,8 @@ async def handle_indexnow_sitemap_all_confirm(callback: CallbackQuery) -> None:
     if ready_count == 0:
         await callback.message.answer("Нет готовых CSV результатов парсинга sitemap.")
         return
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         f"Заменить очереди IndexNow полными sitemap для {ready_count} проектов?\n\n"
         "Текущие URL в этих очередях будут удалены.",
         reply_markup=build_indexnow_sitemap_replace_confirm_keyboard([0, 1]),
@@ -744,7 +855,11 @@ async def handle_indexnow_sitemap_cancel(callback: CallbackQuery) -> None:
     """Cancel a pending full sitemap queue replacement."""
 
     await callback.answer()
-    await callback.message.answer("Полное заполнение очередей отменено.")
+    await _edit_or_answer(
+        callback.message,
+        "Полное заполнение очередей отменено.\n\nIndexNow. Выбери действие.",
+        reply_markup=build_indexnow_actions_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("indexing:indexnow:sitemap:confirm:"))
@@ -791,11 +906,29 @@ async def handle_indexnow_settings_projects(callback: CallbackQuery, state: FSMC
     await _clear_flow_state_preserving_settings(state)
     projects = list_indexnow_projects()
     if not projects:
-        await callback.message.answer("Список проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список проектов пока пуст.",
+            reply_markup=build_indexnow_actions_keyboard(),
+        )
         return
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери проект для настройки ключа IndexNow.",
         reply_markup=build_indexnow_projects_keyboard(projects, mode="settings"),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:settings:back")
+async def handle_indexnow_settings_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from a key action to the IndexNow menu."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _edit_or_answer(
+        callback.message,
+        "IndexNow.\n\nВыбери действие.",
+        reply_markup=build_indexnow_actions_keyboard(),
     )
 
 
@@ -817,7 +950,8 @@ async def handle_indexnow_key_project(callback: CallbackQuery, state: FSMContext
     if project is None:
         await callback.message.answer("Проект не найден.")
         return
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         f"Проект: {project.project_name}\n\n"
         "Выбери способ настройки ключа IndexNow.",
         reply_markup=build_indexnow_key_mode_keyboard(project_id),
@@ -899,11 +1033,25 @@ async def handle_indexnow_project(callback: CallbackQuery) -> None:
         await callback.message.answer("Проект не найден.")
         return
     key_text = "настроен" if summary.has_key else "не настроен"
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         f"Проект: {summary.project.project_name}\n"
         f"URL в очереди: {summary.queue_count}\n"
         f"Ключ IndexNow: {key_text}",
         reply_markup=build_indexnow_project_keyboard(project_id, queue_count=summary.queue_count),
+    )
+
+
+@router.callback_query(F.data == "indexing:indexnow:submit:back")
+async def handle_indexnow_submit_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from a project queue to the IndexNow menu."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _edit_or_answer(
+        callback.message,
+        "IndexNow.\n\nВыбери действие.",
+        reply_markup=build_indexnow_actions_keyboard(),
     )
 
 
@@ -1074,13 +1222,27 @@ async def handle_yandex_recrawl_projects(callback: CallbackQuery, state: FSMCont
     await _clear_flow_state_preserving_settings(state)
     projects = list_yandex_recrawl_projects()
     if not projects:
-        await callback.message.answer("Список проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список проектов пока пуст.",
+            reply_markup=build_yandex_webmaster_actions_keyboard(),
+        )
         return
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери проект.\n\n"
         "В строке показано число URL в очереди и состояние хоста Яндекс Вебмастера.",
         reply_markup=build_yandex_recrawl_projects_keyboard(projects),
     )
+
+
+@router.callback_query(F.data == "indexing:yandex:back")
+async def handle_yandex_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from the Yandex Webmaster menu to indexing."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _show_indexing_actions(callback.message)
 
 
 @router.callback_query(F.data.startswith("indexing:yandex:project:"))
@@ -1102,11 +1264,25 @@ async def handle_yandex_recrawl_project(callback: CallbackQuery) -> None:
         await callback.message.answer("Проект не найден.")
         return
     host_text = "настроен" if summary.has_yandex_host else "не заполнен"
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         f"Проект: {summary.project.project_name}\n"
         f"URL в очереди: {summary.queue_count}\n"
         f"Хост Яндекс Вебмастера: {host_text}",
         reply_markup=build_yandex_recrawl_project_keyboard(project_id, queue_count=summary.queue_count),
+    )
+
+
+@router.callback_query(F.data == "indexing:yandex:recrawl:back")
+async def handle_yandex_recrawl_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from one Yandex queue to the Yandex Webmaster menu."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _edit_or_answer(
+        callback.message,
+        "Яндекс Вебмастер.\nВыбери действие.",
+        reply_markup=build_yandex_webmaster_actions_keyboard(),
     )
 
 
@@ -1230,10 +1406,12 @@ async def handle_sitemap_adhoc(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
     await state.set_state(AdHocSitemapStates.waiting_for_url)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Пришли полный URL sitemap.\n\n"
         "Пример: https://example.com/sitemap.xml\n\n"
         "Для отмены отправь /cancel.",
+        reply_markup=build_sitemap_back_keyboard(),
     )
 
 
@@ -1243,7 +1421,8 @@ async def handle_sitemap_robots_menu(callback: CallbackQuery, state: FSMContext)
 
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Парсинг robots.txt.\nВыбери, откуда запускать проверку.",
         reply_markup=build_sitemap_robots_actions_keyboard(),
     )
@@ -1257,10 +1436,15 @@ async def handle_sitemap_robots_projects(callback: CallbackQuery, state: FSMCont
     await _clear_flow_state_preserving_settings(state)
     projects = list_all_projects()
     if not projects:
-        await callback.message.answer("Список проектов пока пуст.")
+        await _edit_or_answer(
+            callback.message,
+            "Список проектов пока пуст.",
+            reply_markup=build_sitemap_robots_actions_keyboard(),
+        )
         return
 
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Выбери проект для парсинга robots.txt.",
         reply_markup=build_robots_project_selection_keyboard(projects),
     )
@@ -1273,13 +1457,24 @@ async def handle_sitemap_robots_adhoc(callback: CallbackQuery, state: FSMContext
     await callback.answer()
     await _clear_flow_state_preserving_settings(state)
     await state.set_state(AdHocRobotsStates.waiting_for_url)
-    await callback.message.answer(
+    await _edit_or_answer(
+        callback.message,
         "Пришли URL сайта или robots.txt.\n\n"
         "Примеры:\n"
         "- https://example.com\n"
         "- https://example.com/robots.txt\n\n"
         "Для отмены отправь /cancel.",
+        reply_markup=build_sitemap_back_keyboard(),
     )
+
+
+@router.callback_query(F.data == "sitemap:robots:back")
+async def handle_sitemap_robots_back(callback: CallbackQuery, state: FSMContext) -> None:
+    """Return from robots.txt choices to the sitemap section root."""
+
+    await callback.answer()
+    await _clear_flow_state_preserving_settings(state)
+    await _show_sitemap_actions(callback.message)
 
 
 @router.callback_query(F.data == "sitemap:all")
@@ -1892,12 +2087,22 @@ async def handle_projects_callbacks(callback: CallbackQuery, state: FSMContext) 
     await callback.answer()
     data = callback.data or ""
 
+    if data == "projects:back":
+        await _clear_flow_state_preserving_settings(state)
+        await _show_projects_actions(callback.message)
+        return
+
     if data == "projects:list":
         projects = list_all_projects()
         if not projects:
-            await callback.message.answer("Список проектов пока пуст.")
+            await _edit_or_answer(
+                callback.message,
+                "Список проектов пока пуст.",
+                reply_markup=build_projects_actions_keyboard(),
+            )
             return
-        await callback.message.answer(
+        await _edit_or_answer(
+            callback.message,
             "Проекты:\nВыбери проект, чтобы открыть карточку.",
             reply_markup=build_projects_list_keyboard(projects, mode="view"),
         )
@@ -1910,9 +2115,14 @@ async def handle_projects_callbacks(callback: CallbackQuery, state: FSMContext) 
     if data == "projects:edit":
         projects = list_all_projects()
         if not projects:
-            await callback.message.answer("Список проектов пока пуст.")
+            await _edit_or_answer(
+                callback.message,
+                "Список проектов пока пуст.",
+                reply_markup=build_projects_actions_keyboard(),
+            )
             return
-        await callback.message.answer(
+        await _edit_or_answer(
+            callback.message,
             "Выбери проект для редактирования.",
             reply_markup=build_projects_list_keyboard(projects, mode="fields"),
         )
@@ -1921,9 +2131,14 @@ async def handle_projects_callbacks(callback: CallbackQuery, state: FSMContext) 
     if data == "projects:delete":
         projects = list_all_projects()
         if not projects:
-            await callback.message.answer("Список проектов пока пуст.")
+            await _edit_or_answer(
+                callback.message,
+                "Список проектов пока пуст.",
+                reply_markup=build_projects_actions_keyboard(),
+            )
             return
-        await callback.message.answer(
+        await _edit_or_answer(
+            callback.message,
             "Выбери проект для удаления.",
             reply_markup=build_projects_list_keyboard(projects, mode="delete"),
         )
@@ -1938,7 +2153,8 @@ async def handle_projects_callbacks(callback: CallbackQuery, state: FSMContext) 
         if project is None:
             await callback.message.answer("Проект не найден.")
             return
-        await callback.message.answer(
+        await _edit_or_answer(
+            callback.message,
             f"Выбери поле проекта {project.project_name}.",
             reply_markup=build_project_fields_keyboard(project_id),
         )
@@ -1979,7 +2195,11 @@ async def handle_projects_callbacks(callback: CallbackQuery, state: FSMContext) 
         return
 
     if data.startswith("projects:delete:cancel:"):
-        await callback.message.answer("Удаление отменено.")
+        await _edit_or_answer(
+            callback.message,
+            "Удаление отменено.\n\n📁 Проекты\nВыбери действие ниже.",
+            reply_markup=build_projects_actions_keyboard(),
+        )
         return
 
     if data.startswith("projects:delete:"):
@@ -1991,7 +2211,8 @@ async def handle_projects_callbacks(callback: CallbackQuery, state: FSMContext) 
         if project is None:
             await callback.message.answer("Проект не найден.")
             return
-        await callback.message.answer(
+        await _edit_or_answer(
+            callback.message,
             f"Удалить проект {project.project_name}?",
             reply_markup=build_confirm_delete_project_keyboard(project_id),
         )
@@ -2706,7 +2927,7 @@ async def _send_heavy_setting_picker(
     )
 
 
-async def _edit_or_answer(message: Message, text: str, *, reply_markup) -> None:
+async def _edit_or_answer(message: Message, text: str, *, reply_markup=None) -> None:
     """Edit an existing bot message when possible, otherwise send a new one."""
 
     try:
@@ -3578,7 +3799,8 @@ async def _start_project_wizard(message: Message, state: FSMContext, *, project_
 
     title = "Редактирование проекта" if project is not None else "Добавление проекта"
     current_hint = f"\n\nТекущее значение: {project.project_name}" if project is not None else ""
-    await message.answer(
+    await _edit_or_answer(
+        message,
         f"{title}\n\nШаг 1/12\nНазвание проекта.{current_hint}\n\nПришли новое значение.",
         reply_markup=build_main_menu_keyboard(),
     )
@@ -3641,7 +3863,8 @@ async def _prompt_project_wizard_field(message: Message, state: FSMContext, fiel
     await state.set_state(PROJECT_WIZARD_STATE_BY_FIELD[field_name])
 
     if field_name == "crawl_segment":
-        await message.answer(
+        await _edit_or_answer(
+            message,
             f"Шаг {step_number}/12\nСегмент проекта.{current_line}",
             reply_markup=build_project_segment_keyboard(
                 callback_prefix="projects:wizard:segment",
@@ -3651,7 +3874,8 @@ async def _prompt_project_wizard_field(message: Message, state: FSMContext, fiel
         return
 
     if field_name in {"contain_subdomains", "is_multi_sitemap"}:
-        await message.answer(
+        await _edit_or_answer(
+            message,
             f"Шаг {step_number}/12\n{_project_field_label(field_name)}.{current_line}",
             reply_markup=build_project_boolean_keyboard(
                 callback_prefix=f"projects:wizard:boolean:{field_name}",
@@ -3673,7 +3897,8 @@ async def _prompt_project_wizard_field(message: Message, state: FSMContext, fiel
     if field_name in optional_fields:
         reply_markup = build_project_text_action_keyboard(skip_label=keep_label)
 
-    await message.answer(
+    await _edit_or_answer(
+        message,
         f"Шаг {step_number}/12\n{_project_field_label(field_name)}.{current_line}\n\n"
         f"{_project_field_prompt(field_name, is_edit=is_edit)}",
         reply_markup=reply_markup,
@@ -3826,7 +4051,11 @@ async def _send_project_card(message: Message, project_id: int) -> None:
         f"Пример карточки: {project.card_sample or '—'}",
         f"Пример категории: {project.category_sample or '—'}",
     ]
-    await message.answer("\n".join(lines), reply_markup=build_project_card_keyboard(project.id))
+    await _edit_or_answer(
+        message,
+        "\n".join(lines),
+        reply_markup=build_project_card_keyboard(project.id),
+    )
 
 
 def _parse_callback_id(value: str) -> int | None:
