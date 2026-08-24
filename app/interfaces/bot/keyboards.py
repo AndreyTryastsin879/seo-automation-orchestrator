@@ -12,6 +12,7 @@ from app.interfaces.bot.services import (
     RecentTaskSummary,
     StaticSitemapProjectSummary,
     YandexRecrawlProjectSummary,
+    AuditProjectSummary,
 )
 from app.interfaces.bot.services import CrawlLaunchSettings
 from app.modules.bot_access.application import BotAccessUserDTO
@@ -38,6 +39,7 @@ def build_main_menu_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="🔎 Парсинг"), KeyboardButton(text="🗺 Парсинг sitemap")],
             [KeyboardButton(text="📤 Индексирование")],
             [KeyboardButton(text="📁 Проекты"), KeyboardButton(text="📊 Статус")],
+            [KeyboardButton(text="🧾 Аудит сайта")],
             [KeyboardButton(text="👥 Доступ")],
         ],
         resize_keyboard=True,
@@ -131,6 +133,33 @@ def build_sitemap_back_keyboard() -> InlineKeyboardMarkup:
 
     builder = InlineKeyboardBuilder()
     builder.button(text="← Назад", callback_data="sitemap:back")
+    return builder.as_markup()
+
+
+def build_audit_projects_keyboard(projects: list[AuditProjectSummary]) -> InlineKeyboardMarkup:
+    """Build audit project selection with input availability indicators."""
+
+    builder = InlineKeyboardBuilder()
+    for summary in projects:
+        crawl_state = "краулинг OK" if summary.crawl.exists else "нет краулинга"
+        sitemap_state = "sitemap OK" if summary.sitemap.exists else "нет sitemap"
+        builder.button(
+            text=f"{summary.project.project_name} · {crawl_state} · {sitemap_state}",
+            callback_data=f"audit:project:{summary.project.id}",
+        )
+    builder.button(text="← Назад", callback_data="audit:back")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_audit_project_keyboard(project_id: int, *, can_run: bool) -> InlineKeyboardMarkup:
+    """Build actions for the selected project's technical audit."""
+
+    builder = InlineKeyboardBuilder()
+    if can_run:
+        builder.button(text="🧾 Собрать аудит", callback_data=f"audit:run:{project_id}")
+    builder.button(text="← К списку проектов", callback_data="audit:projects")
+    builder.adjust(1)
     return builder.as_markup()
 
 

@@ -18,6 +18,8 @@ from app.modules.projects.domain import CrawlSegment
 from app.interfaces.bot.access import is_root_admin_user
 from app.interfaces.bot.keyboards import (
     build_access_actions_keyboard,
+    build_audit_project_keyboard,
+    build_audit_projects_keyboard,
     build_access_users_keyboard,
     build_adhoc_profile_keyboard,
     build_batch_actions_keyboard,
@@ -73,6 +75,7 @@ from app.interfaces.bot.services import (
     add_indexnow_urls,
     add_yandex_recrawl_urls,
     launch_ad_hoc_robots,
+    launch_project_audit,
     launch_ad_hoc_sitemap,
     launch_ad_hoc_url_list_crawl,
     launch_all_projects_sitemap,
@@ -100,6 +103,7 @@ from app.interfaces.bot.services import (
     launch_static_sitemap_tasks,
     launch_ad_hoc_crawl,
     list_all_projects,
+    list_audit_projects,
     list_yandex_recrawl_projects,
     list_indexnow_projects,
     list_indexnow_sitemap_projects,
@@ -343,6 +347,14 @@ async def handle_sitemap_menu(message: Message) -> None:
     )
 
 
+@router.message(F.text.in_({"Аудит сайта", "🧾 Аудит сайта"}))
+async def handle_audit_menu(message: Message, state: FSMContext) -> None:
+    """Open the technical site audit project selection."""
+
+    await _clear_flow_state_preserving_settings(state)
+    await _show_audit_projects(message)
+
+
 @router.message(F.text.in_({"Индексирование", "📤 Индексирование"}))
 async def handle_indexing_menu(message: Message, state: FSMContext) -> None:
     """Open the indexing section."""
@@ -362,6 +374,75 @@ async def _show_sitemap_actions(message: Message) -> None:
         message,
         "🗺 Парсинг sitemap\nВыбери, как запускать задачу:",
         reply_markup=build_sitemap_actions_keyboard(),
+    )
+
+
+async def _show_audit_projects(message: Message) -> None:
+    """Render audit projects and the availability of input exports."""
+
+    projects = list_audit_projects()
+    if not projects:
+        await _edit_or_answer(message, "Список проектов пока пуст.")
+        return
+    await _edit_or_answer(
+        message,
+        "🧾 Аудит сайта\n\nВыбери проект. Аудит использует последние CSV краулинга и sitemap. "
+        "Если sitemap ещё нет, будет собран частичный отчёт.",
+        reply_markup=build_audit_projects_keyboard(projects),
+    )
+
+
+@router.callback_query(F.data.startswith("audit:"))
+async def handle_audit_callbacks(callback: CallbackQuery, state: FSMContext) -> None:
+    """Show audit input readiness and launch the selected report."""
+
+    await callback.answer()
+    if callback.data == "audit:back":
+        await _clear_flow_state_preserving_settings(state)
+        await callback.message.answer("Главное меню доступно ниже.", reply_markup=build_main_menu_keyboard())
+        return
+    if callback.data == "audit:projects":
+        await _show_audit_projects(callback.message)
+        return
+    try:
+        project_id = int(callback.data.rsplit(":", 1)[-1])
+    except ValueError:
+        await callback.message.answer("Не удалось определить проект.")
+        return
+    summary = next((item for item in list_audit_projects() if item.project.id == project_id), None)
+    if summary is None:
+        await callback.message.answer("Проект не найден.")
+        return
+    if callback.data.startswith("audit:project:"):
+        crawl_text = _format_audit_source(summary.crawl)
+        sitemap_text = _format_audit_source(summary.sitemap)
+        readiness = "готов к запуску" if summary.can_run else "нужен краулинг"
+        await _edit_or_answer(
+            callback.message,
+            f"Аудит: {summary.project.project_name}\n\n"
+            f"Краулинг: {crawl_text}\n"
+            f"Sitemap: {sitemap_text}\n"
+            "Яндекс Вебмастер: пока нет данных\n"
+            "Google Search Console: пока нет данных\n\n"
+            f"Статус: {readiness}.",
+            reply_markup=build_audit_project_keyboard(project_id, can_run=summary.can_run),
+        )
+        return
+    if not callback.data.startswith("audit:run:"):
+        return
+    try:
+        result = launch_project_audit(project_id)
+    except ValueError as error:
+        await callback.message.answer(str(error))
+        return
+    await _clear_flow_state_preserving_settings(state)
+    await _edit_or_answer(
+        callback.message,
+        "Аудит запущен.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Проект: {result.project.project_name}\n"
+        f"Task ID: {result.task.id}\n\n"
+        "После завершения XLSX появится в статусе задачи.",
     )
 
 
@@ -3318,6 +3399,15 @@ async def _clear_flow_state_preserving_settings(state: FSMContext) -> None:
     await _set_crawl_settings(state, settings)
     await _set_heavy_crawl_settings(state, heavy_settings)
     await _set_sitemap_settings(state, sitemap_settings)
+
+
+def _format_audit_source(source) -> str:
+    """Render one audit source without implying unavailable data is zero."""
+
+    if not source.exists:
+        return "нет данных"
+    updated_at = source.updated_at.astimezone().strftime("%d.%m %H:%M") if source.updated_at else ""
+    return f"готов, {source.row_count or 0} URL, {updated_at}"
 
 
 def _format_crawl_settings(settings: CrawlLaunchSettings) -> str:

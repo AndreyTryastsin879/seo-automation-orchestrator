@@ -22,6 +22,7 @@ class TaskBatchType(StrEnum):
     STATIC_SITEMAP_CREATE_ALL = "static_sitemap_create_all"
     YANDEX_WEBMASTER_STATIC_SITEMAP_PROJECT = "yandex_webmaster_static_sitemap_project"
     YANDEX_WEBMASTER_STATIC_SITEMAP_ALL = "yandex_webmaster_static_sitemap_all"
+    SITE_AUDIT_PROJECT = "site_audit_project"
 
 
 class TaskBatchStatus(StrEnum):

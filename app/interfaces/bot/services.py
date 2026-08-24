@@ -20,6 +20,7 @@ from app.modules.indexing.yandex_webmaster import (
     get_recrawl_queue_count,
     prepend_recrawl_urls,
 )
+from app.modules.audit.service import AuditSourceState, inspect_audit_sources
 from app.modules.indexing.indexnow import (
     append_indexnow_urls,
     get_indexnow_queue_count,
@@ -164,6 +165,30 @@ class StaticSitemapProjectSummary:
     project: ProjectDTO
     static_map_count: int
     has_yandex_host: bool
+
+
+@dataclass(slots=True, frozen=True)
+class AuditProjectSummary:
+    """Project audit input state displayed before launch."""
+
+    project: ProjectDTO
+    crawl: AuditSourceState
+    sitemap: AuditSourceState
+
+    @property
+    def can_run(self) -> bool:
+        """An audit needs at least one completed crawl export."""
+
+        return self.crawl.exists
+
+
+@dataclass(slots=True, frozen=True)
+class ProjectAuditLaunchResult:
+    """Created audit task and its project metadata."""
+
+    batch: TaskBatchDTO
+    project: ProjectDTO
+    task: TaskDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -589,6 +614,43 @@ def list_all_projects() -> list[ProjectDTO]:
     try:
         repository = ProjectRepository(session)
         return ListProjectsUseCase(repository).execute()
+    finally:
+        session.close()
+
+
+def list_audit_projects() -> list[AuditProjectSummary]:
+    """List projects along with the currently available audit inputs."""
+
+    return [
+        AuditProjectSummary(project=project, crawl=crawl, sitemap=sitemap)
+        for project in list_all_projects()
+        for crawl, sitemap in [inspect_audit_sources(project.project_name)]
+    ]
+
+
+def launch_project_audit(project_id: int) -> ProjectAuditLaunchResult:
+    """Create a background audit task for a project with crawl data."""
+
+    session = SessionFactory()
+    try:
+        repository = ProjectRepository(session)
+        project = GetProjectUseCase(repository).execute(project_id)
+        if project is None:
+            raise ValueError("Проект не найден.")
+        crawl, _sitemap = inspect_audit_sources(project.project_name)
+        if not crawl.exists:
+            raise ValueError("Для аудита сначала нужен результат парсинга сайта.")
+
+        batch = _create_task_batch(
+            session=session,
+            batch_type=TaskBatchType.SITE_AUDIT_PROJECT,
+            title=f"Аудит сайта: {project.project_name}",
+            payload={"project_id": project.id},
+        )
+        task = _create_site_audit_task(session=session, batch_id=batch.id, project_id=project.id)
+        session.commit()
+        TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="site_audit")
+        return ProjectAuditLaunchResult(batch=batch, project=project, task=task)
     finally:
         session.close()
 
@@ -1771,6 +1833,20 @@ def _create_fetch_robots_task(
                 "url": robots_url,
                 "resolve_status_codes": resolve_status_codes,
             },
+        )
+    )
+
+
+def _create_site_audit_task(*, session, batch_id: int, project_id: int) -> TaskDTO:
+    """Create a project-bound site audit task."""
+
+    return CreateTaskUseCase(TaskRepository(session)).execute(
+        CreateTaskCommand(
+            batch_id=batch_id,
+            project_id=project_id,
+            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            task_type="site_audit",
+            payload={"project_id": project_id},
         )
     )
 

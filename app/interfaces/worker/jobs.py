@@ -42,6 +42,7 @@ from app.modules.indexing.indexnow import (
 )
 from app.modules.indexing.static_sitemaps import read_static_sitemap_manifest, save_static_sitemap_snapshot
 from app.modules.indexnow.service import get_indexnow_credential
+from app.modules.audit.service import build_site_audit
 from app.modules.projects.infrastructure import ProjectRepository
 from app.modules.tasks.domain import JsonPayload
 from app.modules.tasks.domain.enums import TaskStatus
@@ -371,6 +372,12 @@ def execute_task(task_id: int) -> None:
                 task=task,
                 execution_result=execution_result,
             )
+        if task.task_type == "site_audit":
+            execution_result = _persist_site_audit_artifact(
+                session=session,
+                task=task,
+                execution_result=execution_result,
+            )
 
         session.execute(
             update(Task)
@@ -420,6 +427,12 @@ def execute_task(task_id: int) -> None:
                     )
                 if task is not None and task.task_type in {"yandex_webmaster_recrawl", "indexnow_submit", "yandex_webmaster_static_sitemaps"}:
                     execution_result = _persist_indexing_report_artifact(
+                        session=session,
+                        task=task,
+                        execution_result=execution_result,
+                    )
+                if task is not None and task.task_type == "site_audit":
+                    execution_result = _persist_site_audit_artifact(
                         session=session,
                         task=task,
                         execution_result=execution_result,
@@ -494,7 +507,37 @@ def _execute_by_type(task_id: int, task_type: str, payload: JsonPayload | None) 
         return _execute_create_static_sitemaps_task(payload)
     if task_type == "yandex_webmaster_static_sitemaps":
         return _execute_yandex_static_sitemaps_task(task_id, payload)
+    if task_type == "site_audit":
+        return _execute_site_audit_task(payload)
     raise ValueError(f"Unsupported task_type: {task_type}")
+
+
+def _execute_site_audit_task(payload: JsonPayload | None) -> _TaskExecutionResult:
+    """Build a technical audit from the latest project crawl and sitemap CSVs."""
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("project_id"), int):
+        raise ValueError("site_audit payload must contain project_id.")
+    session = SessionFactory()
+    try:
+        project = ProjectRepository(session).get_by_id(payload["project_id"])
+        if project is None:
+            raise ValueError("Проект для аудита не найден.")
+        project_name = project.project_name
+    finally:
+        session.close()
+
+    result = build_site_audit(project_name)
+    return _TaskExecutionResult(
+        result_payload={
+            "project_name": result.project_name,
+            "audit_report": result.relative_path,
+            "crawl_page_count": result.crawl_page_count,
+            "sitemap_url_count": result.sitemap_url_count,
+            "checks_calculated": result.checks_calculated,
+            "checks_skipped": result.checks_skipped,
+        },
+        report_relative_path=result.relative_path,
+    )
 
 
 def _execute_indexnow_sitemap_replace_task(payload: JsonPayload | None) -> _TaskExecutionResult:
@@ -2417,6 +2460,30 @@ def _persist_indexing_report_artifact(
         result_payload=result_payload,
         report_relative_path=execution_result.report_relative_path,
     )
+
+
+def _persist_site_audit_artifact(
+    *,
+    session,
+    task: Task,
+    execution_result: _TaskExecutionResult,
+) -> _TaskExecutionResult:
+    """Expose a generated audit workbook as the task result file."""
+
+    if not execution_result.report_relative_path:
+        return execution_result
+    report_path = LocalFileStorage().root / execution_result.report_relative_path
+    if not report_path.exists():
+        return execution_result
+    _upsert_task_file(
+        session=session,
+        task_id=task.id,
+        file_name="audit.xlsx",
+        file_path=execution_result.report_relative_path,
+        file_type="xlsx",
+        file_size=report_path.stat().st_size,
+    )
+    return execution_result
 
 
 def _persist_partial_crawl_csv(*, task: Task, csv_content: str):
