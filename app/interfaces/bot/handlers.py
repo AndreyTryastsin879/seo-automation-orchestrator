@@ -1491,7 +1491,11 @@ async def handle_parsing_url_list_launch(callback: CallbackQuery, state: FSMCont
 
         try:
             settings = await _get_adhoc_crawl_settings(state)
-            result = launch_ad_hoc_url_list_crawl(normalized_input_urls, settings=settings)
+            result = launch_ad_hoc_url_list_crawl(
+                normalized_input_urls,
+                settings=settings,
+                crawl_segment=await _get_adhoc_crawl_segment(state),
+            )
         except ValueError as exc:
             await callback.message.answer(str(exc))
             return
@@ -2165,7 +2169,11 @@ async def handle_adhoc_url_input(message: Message, state: FSMContext) -> None:
 
     try:
         settings = await _get_adhoc_crawl_settings(state)
-        result = launch_ad_hoc_crawl(raw_text, settings=settings)
+        result = launch_ad_hoc_crawl(
+            raw_text,
+            settings=settings,
+            crawl_segment=await _get_adhoc_crawl_segment(state),
+        )
     except ValueError as exc:
         await message.answer(str(exc))
         return
@@ -2952,6 +2960,15 @@ async def _get_adhoc_crawl_settings(state: FSMContext) -> CrawlLaunchSettings:
     if profile == "heavy":
         return await _get_heavy_crawl_settings(state)
     return await _get_crawl_settings(state)
+
+
+async def _get_adhoc_crawl_segment(state: FSMContext) -> CrawlSegment:
+    """Map the selected ad-hoc profile to its worker segment."""
+
+    data = await state.get_data()
+    if data.get(ADHOC_CRAWL_PROFILE_STATE_KEY) == "heavy":
+        return CrawlSegment.HEAVY
+    return CrawlSegment.DEFAULT
 
 
 async def _get_sitemap_settings(state: FSMContext) -> dict[str, bool]:

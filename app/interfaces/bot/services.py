@@ -399,6 +399,7 @@ def launch_ad_hoc_crawl(
     *,
     project_name: str | None = None,
     settings: CrawlLaunchSettings | None = None,
+    crawl_segment: CrawlSegment = CrawlSegment.DEFAULT,
 ) -> AdHocCrawlLaunchResult:
     """Create an ad-hoc crawl task without writing a project record."""
 
@@ -425,7 +426,7 @@ def launch_ad_hoc_crawl(
             start_url=normalized_start_url,
             project_name=derived_project_name,
             settings=settings,
-            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            queue_name=_queue_name_for_segment(crawl_segment),
         )
         session.commit()
         TaskQueue(queue_name=task.queue_name).enqueue(task.id, task_type="crawl_site")
@@ -444,6 +445,7 @@ def launch_ad_hoc_url_list_crawl(
     *,
     project_name: str | None = None,
     settings: CrawlLaunchSettings | None = None,
+    crawl_segment: CrawlSegment = CrawlSegment.DEFAULT,
 ) -> AdHocUrlListCrawlLaunchResult:
     """Create a crawl task that processes only the provided URL list."""
 
@@ -476,7 +478,7 @@ def launch_ad_hoc_url_list_crawl(
             start_url=normalized_urls[0],
             project_name=derived_project_name,
             settings=effective_settings,
-            queue_name=CRAWL_DEFAULT_QUEUE_NAME,
+            queue_name=_queue_name_for_segment(crawl_segment),
             seed_urls=normalized_urls,
             follow_links=False,
         )
