@@ -8,6 +8,7 @@ import secrets
 from urllib.parse import urlsplit
 
 from aiogram import Dispatcher, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -2961,6 +2962,10 @@ async def _edit_or_answer(message: Message, text: str, *, reply_markup=None) -> 
 
     try:
         await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            return
+        await message.answer(text, reply_markup=reply_markup)
     except Exception:
         await message.answer(text, reply_markup=reply_markup)
 

@@ -1,7 +1,10 @@
-"""Regression checks for inline navigation in the parsing section."""
+"""Regression checks for inline navigation in the bot interface."""
 
+import asyncio
 from types import SimpleNamespace
 import unittest
+
+from aiogram.exceptions import TelegramBadRequest
 
 from app.interfaces.bot.keyboards import (
     build_adhoc_profile_keyboard,
@@ -42,6 +45,7 @@ from app.interfaces.bot.keyboards import (
     build_yandex_webmaster_actions_keyboard,
 )
 from app.interfaces.bot.services import CrawlLaunchSettings
+from app.interfaces.bot.handlers import _edit_or_answer
 
 
 def _callback_data(markup) -> set[str]:
@@ -204,3 +208,19 @@ class ParsingNavigationKeyboardTests(unittest.TestCase):
         self.assertIn("recent:batch:3", callbacks)
         self.assertIn("recent:task:17", callbacks)
         self.assertIn("status:recent", callbacks)
+
+    def test_unchanged_refresh_does_not_create_a_duplicate_message(self) -> None:
+        class UnchangedMessage:
+            answer_calls = 0
+
+            async def edit_text(self, text: str, *, reply_markup=None) -> None:
+                raise TelegramBadRequest(method=None, message="Bad Request: message is not modified")
+
+            async def answer(self, text: str, *, reply_markup=None) -> None:
+                self.answer_calls += 1
+
+        message = UnchangedMessage()
+
+        asyncio.run(_edit_or_answer(message, "Current status"))
+
+        self.assertEqual(message.answer_calls, 0)
