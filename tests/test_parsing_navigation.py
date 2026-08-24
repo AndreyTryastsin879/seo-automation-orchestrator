@@ -7,6 +7,7 @@ import unittest
 from aiogram.exceptions import TelegramBadRequest
 
 from app.interfaces.bot.keyboards import (
+    _status_icon,
     build_adhoc_profile_keyboard,
     build_batch_actions_keyboard,
     build_confirm_all_projects_keyboard,
@@ -118,6 +119,9 @@ class ParsingNavigationKeyboardTests(unittest.TestCase):
                 "👥 Доступ",
             ],
         )
+
+    def test_running_status_uses_a_different_icon_than_refresh(self) -> None:
+        self.assertEqual(_status_icon("running"), "⚙️")
 
     def test_sitemap_indexing_and_projects_subscreens_include_back_callback(self) -> None:
         project = SimpleNamespace(

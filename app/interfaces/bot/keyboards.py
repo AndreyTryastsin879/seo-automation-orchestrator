@@ -23,7 +23,7 @@ def _status_icon(status: str) -> str:
 
     return {
         "pending": "⏳",
-        "running": "🔄",
+        "running": "⚙️",
         "success": "✅",
         "failed": "❌",
         "cancelled": "🛑",
