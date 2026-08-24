@@ -3,14 +3,41 @@
 from __future__ import annotations
 
 import socket
+import time
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.fsm.storage.redis import RedisStorage
 
 from app.core.config import get_settings
+from app.core.logging import get_logger, log_event
 from app.interfaces.bot.access import BotAccessMiddleware
 from app.interfaces.bot.handlers import register_handlers
+
+LOGGER = get_logger("app.bot.telegram")
+SLOW_TELEGRAM_REQUEST_SECONDS = 1.0
+
+
+async def _log_slow_telegram_request(
+    make_request: Any,
+    bot: Bot,
+    method: Any,
+) -> Any:
+    """Record slow Telegram API calls without logging request data or secrets."""
+
+    started_at = time.monotonic()
+    try:
+        return await make_request(bot, method)
+    finally:
+        duration_seconds = time.monotonic() - started_at
+        if duration_seconds >= SLOW_TELEGRAM_REQUEST_SECONDS:
+            log_event(
+                LOGGER,
+                "slow_telegram_api_request",
+                method=type(method).__name__,
+                duration_ms=round(duration_seconds * 1000),
+            )
 
 
 def create_bot() -> Bot:
@@ -23,6 +50,7 @@ def create_bot() -> Bot:
     if not settings.bot_proxy:
         # The production VPS has an unavailable IPv6 route to Telegram API.
         session._connector_init["family"] = socket.AF_INET
+    session.middleware.register(_log_slow_telegram_request)
     return Bot(token=settings.bot_token, session=session)
 
 
