@@ -1,6 +1,7 @@
 """Regression checks for inline navigation in the bot interface."""
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 import unittest
 
@@ -46,7 +47,11 @@ from app.interfaces.bot.keyboards import (
     build_yandex_webmaster_actions_keyboard,
 )
 from app.interfaces.bot.services import CrawlLaunchSettings
-from app.interfaces.bot.handlers import _edit_or_answer
+from app.interfaces.bot.handlers import (
+    _edit_or_answer,
+    handle_access_user_phone_input,
+    handle_adhoc_sitemap_url_input,
+)
 
 
 def _callback_data(markup) -> set[str]:
@@ -228,3 +233,7 @@ class ParsingNavigationKeyboardTests(unittest.TestCase):
         asyncio.run(_edit_or_answer(message, "Current status"))
 
         self.assertEqual(message.answer_calls, 0)
+
+    def test_adding_access_user_cannot_start_an_adhoc_sitemap(self) -> None:
+        self.assertNotIn("launch_ad_hoc_sitemap", inspect.getsource(handle_access_user_phone_input))
+        self.assertIn("launch_ad_hoc_sitemap", inspect.getsource(handle_adhoc_sitemap_url_input))

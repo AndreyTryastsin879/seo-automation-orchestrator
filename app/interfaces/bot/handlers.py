@@ -2690,6 +2690,37 @@ async def handle_adhoc_sitemap_url_input(message: Message, state: FSMContext) ->
         await message.answer("Не вижу URL. Отправь адрес sitemap, например https://example.com/sitemap.xml")
         return
 
+    if raw_text.startswith("/"):
+        await message.answer("Сначала заверши текущий сценарий через /cancel или пришли URL sitemap.")
+        return
+
+    try:
+        sitemap_settings = await _get_sitemap_settings(state)
+        result = launch_ad_hoc_sitemap(
+            raw_text,
+            resolve_status_codes=sitemap_settings["resolve_status_codes"],
+        )
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+    except Exception:
+        await message.answer(
+            "Не удалось запустить парсинг sitemap. Попробуй ещё раз чуть позже."
+        )
+        return
+
+    await _clear_flow_state_preserving_settings(state)
+    await message.answer(
+        "Парсинг sitemap запущен.\n\n"
+        f"ID запуска: {result.batch.id}\n"
+        f"Sitemap URL: {result.sitemap_url}\n"
+        f"Task ID: {result.task.id}\n"
+        f"Тип задачи: {result.task.task_type}\n"
+        f"Статус: {result.task.status.value}\n\n"
+        "Проверить запуск можно через раздел Статус.",
+        reply_markup=build_main_menu_keyboard(),
+    )
+
 
 @router.message(AccessUserStates.waiting_for_phone)
 async def handle_access_user_phone_input(message: Message, state: FSMContext) -> None:
@@ -2729,37 +2760,6 @@ async def handle_access_user_phone_input(message: Message, state: FSMContext) ->
     await message.answer(
         "Пользователь добавлен в доступ.\n\n"
         f"Номер: {access_user.phone_number}",
-        reply_markup=build_main_menu_keyboard(),
-    )
-
-    if raw_text.startswith("/"):
-        await message.answer("Сначала заверши текущий сценарий через /cancel или пришли URL sitemap.")
-        return
-
-    try:
-        sitemap_settings = await _get_sitemap_settings(state)
-        result = launch_ad_hoc_sitemap(
-            raw_text,
-            resolve_status_codes=sitemap_settings["resolve_status_codes"],
-        )
-    except ValueError as exc:
-        await message.answer(str(exc))
-        return
-    except Exception:
-        await message.answer(
-            "Не удалось запустить парсинг sitemap. Попробуй ещё раз чуть позже."
-        )
-        return
-
-    await _clear_flow_state_preserving_settings(state)
-    await message.answer(
-        "Парсинг sitemap запущен.\n\n"
-        f"ID запуска: {result.batch.id}\n"
-        f"Sitemap URL: {result.sitemap_url}\n"
-        f"Task ID: {result.task.id}\n"
-        f"Тип задачи: {result.task.task_type}\n"
-        f"Статус: {result.task.status.value}\n\n"
-        "Проверить запуск можно через раздел Статус.",
         reply_markup=build_main_menu_keyboard(),
     )
 
