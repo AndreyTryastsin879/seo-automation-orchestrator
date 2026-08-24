@@ -2292,8 +2292,12 @@ async def handle_status_callbacks(callback: CallbackQuery, state: FSMContext) ->
         )
         return
 
-    if callback.data == "status:recent":
-        await _send_recent_batches(callback.message, back_callback="status:back")
+    if callback.data in {"status:recent", "status:recent:refresh"}:
+        await _send_recent_batches(
+            callback.message,
+            back_callback="status:back",
+            refresh_callback="status:recent:refresh",
+        )
         return
 
     await callback.message.answer("Сценарий пока не реализован.")
@@ -2338,7 +2342,7 @@ async def handle_recent_batch_stop_confirm(callback: CallbackQuery) -> None:
         f"Снято с очереди: {result.pending_cancelled}\n"
         f"Отмечено на остановку: {result.running_cancel_requested}",
     )
-    await _send_batch_status(callback.message, batch_id)
+    await _send_batch_status(callback.message, batch_id, edit_current=True)
 
 
 @router.callback_query(F.data.startswith("recent:batch:stop:cancel:"))
@@ -2352,7 +2356,7 @@ async def handle_recent_batch_stop_cancel(callback: CallbackQuery) -> None:
     except ValueError:
         await callback.message.answer("Остановка запуска отменена.")
         return
-    await _send_batch_status(callback.message, batch_id)
+    await _send_batch_status(callback.message, batch_id, edit_current=True)
 
 
 @router.callback_query(F.data.startswith("recent:batch:stop:"))
@@ -2387,7 +2391,7 @@ async def handle_recent_batch_open(callback: CallbackQuery, state: FSMContext) -
         await callback.message.answer("Не удалось определить запуск.")
         return
 
-    await _send_batch_status(callback.message, batch_id)
+    await _send_batch_status(callback.message, batch_id, edit_current=True)
 
 
 @router.message(AdHocCrawlStates.waiting_for_url)
@@ -2823,7 +2827,12 @@ async def handle_task_status_input(message: Message, state: FSMContext) -> None:
     await _clear_flow_state_preserving_settings(state)
 
 
-async def _send_recent_batches(message: Message, *, back_callback: str | None = None) -> None:
+async def _send_recent_batches(
+    message: Message,
+    *,
+    back_callback: str | None = None,
+    refresh_callback: str | None = None,
+) -> None:
     """Show recent launches, optionally as an inline navigation screen."""
 
     recent_batches = list_recent_batches(limit=10)
@@ -2832,7 +2841,11 @@ async def _send_recent_batches(message: Message, *, back_callback: str | None = 
             await _edit_or_answer(
                 message,
                 "Пока нет ни одного запуска.",
-                reply_markup=build_recent_batches_keyboard([], back_callback=back_callback),
+                reply_markup=build_recent_batches_keyboard(
+                    [],
+                    back_callback=back_callback,
+                    refresh_callback=refresh_callback,
+                ),
             )
         else:
             await message.answer("Пока нет ни одного запуска.")
@@ -2842,6 +2855,7 @@ async def _send_recent_batches(message: Message, *, back_callback: str | None = 
     reply_markup = build_recent_batches_keyboard(
         recent_batches,
         back_callback=back_callback,
+        refresh_callback=refresh_callback,
     )
     if back_callback is not None:
         await _edit_or_answer(message, text, reply_markup=reply_markup)
@@ -2951,12 +2965,19 @@ async def _edit_or_answer(message: Message, text: str, *, reply_markup=None) -> 
         await message.answer(text, reply_markup=reply_markup)
 
 
-async def _send_batch_status(message: Message, batch_id: int) -> None:
+async def _send_batch_status(message: Message, batch_id: int, *, edit_current: bool = False) -> None:
     """Send launch status details and related tasks."""
 
     result = get_batch_status(batch_id)
     if result is None:
-        await message.answer("Запуск с таким ID не найден.")
+        if edit_current:
+            await _edit_or_answer(
+                message,
+                "Запуск с таким ID не найден.",
+                reply_markup=build_status_back_keyboard(),
+            )
+        else:
+            await message.answer("Запуск с таким ID не найден.")
         return
 
     batch = result.batch
@@ -2984,18 +3005,24 @@ async def _send_batch_status(message: Message, batch_id: int) -> None:
                 lines.extend(progress_lines)
 
     can_stop = batch.status.value in {"pending", "running"}
-    await message.answer(
-        "\n".join(lines),
-        reply_markup=build_batch_actions_keyboard(
-            batch_id=batch.id,
-            can_stop=can_stop,
-        ),
+    reply_markup = build_batch_actions_keyboard(
+        batch_id=batch.id,
+        can_stop=can_stop,
+        tasks=tasks if edit_current else None,
+        back_callback="status:recent" if edit_current else None,
     )
-    if tasks:
+    if edit_current:
+        await _edit_or_answer(message, "\n".join(lines), reply_markup=reply_markup)
+    else:
         await message.answer(
-            "Задачи этого запуска:",
-            reply_markup=build_recent_tasks_keyboard(tasks),
+            "\n".join(lines),
+            reply_markup=reply_markup,
         )
+        if tasks:
+            await message.answer(
+                "Задачи этого запуска:",
+                reply_markup=build_recent_tasks_keyboard(tasks),
+            )
 
 
 async def _send_task_status(message: Message, task_id: int, *, clear_to_menu: bool) -> None:

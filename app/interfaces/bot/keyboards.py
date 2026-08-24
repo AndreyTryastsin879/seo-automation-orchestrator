@@ -587,13 +587,27 @@ def build_confirm_stop_parsing_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def build_batch_actions_keyboard(*, batch_id: int, can_stop: bool, supports_soft_stop: bool = False) -> InlineKeyboardMarkup:
+def build_batch_actions_keyboard(
+    *,
+    batch_id: int,
+    can_stop: bool,
+    supports_soft_stop: bool = False,
+    tasks: list[RecentTaskSummary] | None = None,
+    back_callback: str | None = None,
+) -> InlineKeyboardMarkup:
     """Build actions for a specific launch card."""
 
     builder = InlineKeyboardBuilder()
     if can_stop:
         builder.button(text="🛑 Остановить этот запуск", callback_data=f"recent:batch:stop:{batch_id}")
     builder.button(text="🔄 Обновить", callback_data=f"recent:batch:{batch_id}")
+    for task in tasks or []:
+        builder.button(
+            text=f"#{task.task_id} {_status_icon(task.status)} {task.label} [{task.status}]",
+            callback_data=f"recent:task:{task.task_id}",
+        )
+    if back_callback is not None:
+        builder.button(text="← Назад", callback_data=back_callback)
     builder.adjust(1)
     return builder.as_markup()
 
@@ -623,7 +637,11 @@ def build_recent_tasks_keyboard(tasks: list[RecentTaskSummary]) -> InlineKeyboar
 
 
 def build_recent_batches_keyboard(
-    batches: list[RecentBatchSummary], *, include_parsing_back: bool = False, back_callback: str | None = None
+    batches: list[RecentBatchSummary],
+    *,
+    include_parsing_back: bool = False,
+    back_callback: str | None = None,
+    refresh_callback: str | None = None,
 ) -> InlineKeyboardMarkup:
     """Build an inline keyboard for recent launches."""
 
@@ -640,6 +658,8 @@ def build_recent_batches_keyboard(
         builder.button(text="← Назад", callback_data=back_callback)
     elif include_parsing_back:
         builder.button(text="← Назад", callback_data="parsing:back")
+    if refresh_callback is not None:
+        builder.button(text="🔄 Обновить", callback_data=refresh_callback)
     builder.adjust(1)
     return builder.as_markup()
 

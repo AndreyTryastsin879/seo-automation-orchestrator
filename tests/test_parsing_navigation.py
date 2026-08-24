@@ -5,6 +5,7 @@ import unittest
 
 from app.interfaces.bot.keyboards import (
     build_adhoc_profile_keyboard,
+    build_batch_actions_keyboard,
     build_confirm_all_projects_keyboard,
     build_confirm_stop_parsing_keyboard,
     build_heavy_project_selection_keyboard,
@@ -170,5 +171,36 @@ class ParsingNavigationKeyboardTests(unittest.TestCase):
 
         self.assertIn(
             "status:back",
-            _callback_data(build_recent_batches_keyboard([batch], back_callback="status:back")),
+            _callback_data(
+                build_recent_batches_keyboard(
+                    [batch],
+                    back_callback="status:back",
+                    refresh_callback="status:recent:refresh",
+                )
+            ),
         )
+        self.assertIn(
+            "status:recent:refresh",
+            _callback_data(
+                build_recent_batches_keyboard(
+                    [batch],
+                    back_callback="status:back",
+                    refresh_callback="status:recent:refresh",
+                )
+            ),
+        )
+
+    def test_batch_status_keyboard_refreshes_in_place_and_returns_to_recent_launches(self) -> None:
+        task = SimpleNamespace(task_id=17, status="running", label="Example task")
+        callbacks = _callback_data(
+            build_batch_actions_keyboard(
+                batch_id=3,
+                can_stop=True,
+                tasks=[task],
+                back_callback="status:recent",
+            )
+        )
+
+        self.assertIn("recent:batch:3", callbacks)
+        self.assertIn("recent:task:17", callbacks)
+        self.assertIn("status:recent", callbacks)
