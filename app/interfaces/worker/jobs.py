@@ -2267,7 +2267,7 @@ def _detect_sitemap_type(root: ElementTree.Element) -> str | None:
 
 
 def _extract_sitemap_locations(root: ElementTree.Element) -> list[str]:
-    """Extract all sitemap location entries from an XML tree."""
+    """Extract and normalize all sitemap location entries from an XML tree."""
 
     entries: list[str] = []
     for element in root.iter():
@@ -2275,7 +2275,7 @@ def _extract_sitemap_locations(root: ElementTree.Element) -> list[str]:
             continue
         location = element.text.strip()
         if location:
-            entries.append(location)
+            entries.append(_sanitize_absolute_url(location))
     return entries
 
 
